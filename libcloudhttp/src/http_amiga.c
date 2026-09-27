@@ -134,9 +134,32 @@ static void hlog_fn(const char *fmt, ...)
     }
 }
 
+static char g_last_error[256] = "";
+
+const char *http_last_error(void)
+{
+    return g_last_error;
+}
+
+/* Keep a copy of every HERR message for http_last_error(), without the
+ * "amicloudcore: " prefix and the trailing newline. */
+static void remember_error(const char *fmt, va_list ap)
+{
+    const char *p = "amicloudcore: ";
+    size_t len;
+    char buf[sizeof(g_last_error)];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    if (strncmp(buf, p, strlen(p)) == 0)
+        memmove(buf, buf + strlen(p), strlen(buf + strlen(p)) + 1);
+    len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
+    strcpy(g_last_error, buf);
+}
+
 static void herr_fn(const char *fmt, ...)
 {
     va_list ap;
+    va_start(ap, fmt); remember_error(fmt, ap); va_end(ap);
     if (http_log_bptr && http_log_path[0]) {
         char buf[512]; LONG len;
         va_start(ap, fmt); len = (LONG)vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
@@ -1040,6 +1063,7 @@ void http_response_free(HttpResponse *r)
 /* ------------------------------------------------------------------ */
 int http_init(void)
 {
+    g_last_error[0] = '\0';
     HLOG("http_init: opening utility.library\n");
     UtilityBase = OpenLibrary("utility.library", 0);
     if (!UtilityBase) {

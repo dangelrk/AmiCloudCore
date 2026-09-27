@@ -449,10 +449,22 @@ void http_response_free(HttpResponse *r)
     if (r) { free(r->body); free(r); }
 }
 
+static char g_last_error[256] = "";
+
+const char *http_last_error(void)
+{
+    return g_last_error;
+}
+
 int http_init(void)
 {
-    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) return 0;
+    g_last_error[0] = '\0';
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) {
+        snprintf(g_last_error, sizeof(g_last_error), "curl_global_init failed");
+        return 0;
+    }
     g_curl = curl_easy_init();
+    if (!g_curl) snprintf(g_last_error, sizeof(g_last_error), "curl_easy_init failed");
     return g_curl ? 1 : 0;
 }
 

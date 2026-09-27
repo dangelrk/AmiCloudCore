@@ -133,6 +133,13 @@ void http_response_free(HttpResponse *r);
 int  http_init(void);
 void http_cleanup(void);
 
+/* Text of the most recent error reported by the HTTP layer (e.g. why
+ * http_init() failed: "cannot open bsdsocket.library"), without prefix
+ * and trailing newline; "" if none. Recorded regardless of
+ * ac_errors_to_stderr, so GUI programs -- which suppress stderr output --
+ * can still show the reason in a requester or message box. */
+const char *http_last_error(void);
+
 #ifdef PLATFORM_AMIGA
 #include <dos/dos.h>      /* BPTR ist in dos/dos.h definiert (NICHT exec/types.h)! */
 /* http_log_bptr: Sentinel-Flag (!=0 = HTTP-Log aktiv), kein offenes Handle.
