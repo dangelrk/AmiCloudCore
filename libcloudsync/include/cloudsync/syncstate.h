@@ -5,7 +5,7 @@
 #define CLOUDSYNC_SYNCSTATE_H
 
 /*
- * syncstate.h -- persistent last-sync baseline (docs/architecture/
+ * syncstate.h -- persistent last-sync baseline (AmiOwnCloud docs/design/
  * 07_Sync_Metadaten.md's "Lokale Sync-Datenbank"), stored as JSON in
  * <local_root>/.amicloudsync. This is the missing piece that lets
  * cloudsync_run() tell "deleted since the last sync" apart from "never

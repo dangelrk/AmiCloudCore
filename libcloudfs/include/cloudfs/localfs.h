@@ -101,7 +101,7 @@ int localfs_utime(const char *path, long mtime_epoch);
  * recursive -- a caller wanting to remove a non-empty directory tree
  * walks it with localfs_opendir/readdir first, exactly like the server's
  * own deleteTree() and cmd.c's del_recursive_fallback() already do for
- * the remote side). Used by sync's delete-propagation (docs/architecture/
+ * the remote side). Used by sync's delete-propagation (AmiOwnCloud docs/design/
  * 07_Sync_Metadaten.md). Returns 1 on success. */
 int localfs_remove(const char *path);
 

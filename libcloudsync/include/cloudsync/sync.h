@@ -6,10 +6,10 @@
 
 /*
  * sync.h — two-way local<->cloud folder synchronization with a
- * persistent last-sync baseline (docs/architecture/07_Sync_Metadaten.md).
+ * persistent last-sync baseline (AmiOwnCloud docs/design/07_Sync_Metadaten.md).
  * Originally extracted from the old client/panel.c's panel_sync()
- * (docs/handler-plan.md's sibling, docs/interactive-shell-plan.html
- * section 20) into its own library per docs/05_Refactoring_Client_
+ * (AmiCloud docs/design/handler-plan.md's sibling, AmiCloud docs/design/interactive-shell-plan.html
+ * section 20) into its own library per AmiCloud docs/design/05_Refactoring_Client_
  * Handler.md, M1: sync no longer ships wired into any interactive
  * frontend (shell command / Commander menu) — it lives here, dormant,
  * until a future cloudsync commodity (roadmap phase 5) links it.

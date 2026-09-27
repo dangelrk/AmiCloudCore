@@ -5,8 +5,8 @@
 #define COMMON_SEARCH_H
 
 /*
- * search.h — local-panel side of the Commander search feature (docs/
- * architecture/search-plan.md). The cloud side just calls cmd_search()
+ * search.h — local-panel side of the Commander search feature (AmiCloud docs/design/
+ * search-plan.md). The cloud side just calls cmd_search()
  * (libcloudhttp) directly; this covers PANEL_LOCAL, which has no server
  * to ask and instead walks the local filesystem itself, matching each
  * entry's basename with the shared pattern.h wildcard matcher ("*", "?",

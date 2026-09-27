@@ -3,7 +3,7 @@
  */
 /*
  * sync.c — two-way local<->cloud folder synchronization with a persistent
- * last-sync baseline (docs/architecture/07_Sync_Metadaten.md). Originally
+ * last-sync baseline (AmiOwnCloud docs/design/07_Sync_Metadaten.md). Originally
  * extracted verbatim from the old client/panel.c's panel_sync() (see
  * sync.h); this rewrite adds the missing baseline (syncstate.h) so a
  * 3-way diff (Local / Remote / Baseline) replaces the old stateless
@@ -182,7 +182,7 @@ static int mtimes_equal(long a, long b)
  * traversal, effectively free. Works fine on AmigaOS too — dos.library
  * Lock() accepts ordinary multi-component "dir/sub/file" paths.
  *
- * MD5 cache (docs/architecture/07_Sync_Metadaten.md): a file whose size
+ * MD5 cache (AmiOwnCloud docs/design/07_Sync_Metadaten.md): a file whose size
  * AND mtime still match its baseline entry is presumed unchanged and
  * reuses the baseline's cached hash instead of rehashing; only a file
  * that actually looks different gets a fresh md5_file_hex(). */
@@ -475,7 +475,7 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
 
     /* Pass 1: 3-way merge-scan over Remote (ridx) / Local (lidx) /
      * Baseline (old_st), all keyed by the same relative path -- decide
-     * one action (or none) per path. See docs/architecture/
+     * one action (or none) per path. See AmiOwnCloud docs/design/
      * 07_Sync_Metadaten.md for the full decision matrix this implements. */
     ri = li = bi = 0;
     while (ri < ridx.n || li < lidx.n || bi < old_st.n) {

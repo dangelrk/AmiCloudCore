@@ -66,7 +66,7 @@ static void make_auth(char *out, size_t sz, const AcConfig *cfg)
 
 /* Percent-encodes in into out (RFC 3986 unreserved chars pass through
  * unescaped, everything else becomes %XX -- including space, as %20 per
- * docs/API.md's setdate example, not '+'). Silently truncates if out is
+ * AmiCloud docs/api/API.md's setdate example, not '+'). Silently truncates if out is
  * too small for the fully-encoded result. */
 static void url_encode(char *out, size_t outsz, const char *in)
 {
@@ -367,9 +367,10 @@ int cmd_status(const AcConfig *cfg, char *version_out, size_t version_sz, long *
 }
 
 /* ------------------------------------------------------------------ */
-/* changes (delta since a given global revision, docs/architecture/       */
-/* 07_Sync_Metadaten.md) -- unlike list, not scoped to a directory: one   */
-/* call returns every changed path for this user, tombstones included.   */
+/* changes (delta since a given global revision, AmiOwnCloud             */
+/* docs/design/07_Sync_Metadaten.md) -- unlike list, not scoped to a      */
+/* directory: one call returns every changed path for this user,         */
+/* tombstones included.                                                   */
 /* ------------------------------------------------------------------ */
 int cmd_changes(const AcConfig *cfg, long since, AcChange **out, int *out_n, long *global_revision_out)
 {
@@ -1108,7 +1109,7 @@ int cmd_setdate_mtime(const AcConfig *cfg, const char *remote_path, long mtime_e
 /* del -r (recursive delete)                                            */
 /* ------------------------------------------------------------------ */
 
-/* Client-side fallback (Variante A, see docs/interactive-shell-plan.html
+/* Client-side fallback (Variante A, see AmiCloud docs/design/interactive-shell-plan.html
  * §9.3): walk the tree ourselves and delete bottom-up using the plain
  * `delete` action. Used only when the server doesn't understand
  * recursive=1 (older deployment). */
@@ -1176,7 +1177,7 @@ int cmd_del_recursive(const AcConfig *cfg, const char *remote_path)
 
 /* ------------------------------------------------------------------ */
 /* get_buf / put_buf (in-memory transfers for the CLOUD: handler's       */
-/* worker process, see docs/handler-plan.md Stufe 2)                     */
+/* worker process, see AmiCloud docs/design/handler-plan.md Stufe 2)                     */
 /* ------------------------------------------------------------------ */
 int cmd_get_buf(const AcConfig *cfg, const char *remote_path, char **out, long *out_len, int *status_out)
 {

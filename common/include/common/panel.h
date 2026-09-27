@@ -16,7 +16,7 @@
  * `get -r`/`put -r` and any GUI copy operation. Moving them here lets a
  * GUI frontend reuse them without dragging shell.c's REPL loop along.
  *
- * This is a copy of the old client/panel.c/.h (docs/05_Refactoring_Client_
+ * This is a copy of the old client/panel.c/.h (AmiCloud docs/design/05_Refactoring_Client_
  * Handler.md, M5) with the two-way sync engine (panel_sync()/SyncSummary
  * and its helpers) removed — that logic now lives in libcloudsync
  * (libcloudsync/include/cloudsync/sync.h), dormant until a future

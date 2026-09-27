@@ -3,7 +3,7 @@
 # libcloudhttp — HTTP/HTTPS transport (libcurl) + cmd_*() API (list/get/
 # put/del/info/mkdir/rename/setcomment/setprotect/setdate/*_buf/*_raw).
 # The only two things allowed to know the server's wire contract (auth
-# scheme, api.php?action=... URL shape) — see docs/05, module-encapsulation.
+# scheme, api.php?action=... URL shape) — see AmiCloud docs/design/05_Refactoring_Client_Handler.md, module-encapsulation.
 #
 # Build:   make -f Makefile.pc
 # Output:  <repo-root>/lib/pc/libcloudhttp.a (NOT bin/ — bin/ is

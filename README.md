@@ -72,10 +72,10 @@ make clean
 - Werden Quelldateien einer Bibliothek hinzugefügt oder entfernt, müssen
   die `Makefile.amiga-cross` der Programme angepasst und `Build-Amiga`
   neu erzeugt werden (`make verify-amiga-script` im Projekt).
-- Viele Kommentare verweisen auf Planungsdokumente (`docs/05_…`,
-  `docs/architecture/…`, `docs/handler-plan.md` usw.) aus der Zeit vor
-  der Aufteilung in eigene Repositories. Diese Dokumente liegen jetzt in
-  den Projekten unter `docs/design/`, überwiegend in AmiCloud.
+- Kommentare verweisen auf Planungsdokumente aus der Zeit vor der
+  Aufteilung in eigene Repositories. Sie liegen in den Projekten unter
+  `docs/design/`; der Verweis nennt das Projekt, z. B.
+  „AmiOwnCloud docs/design/07_Sync_Metadaten.md“.
 
 ## Lizenz
 

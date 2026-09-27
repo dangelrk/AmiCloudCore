@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Ronny Krueger
 # libcloudhttp — AmigaOS 3.x (VBCC), CROSS-compiled from a host (macOS/
 # Linux/Windows) using the toolchain described in
-# docs/BUILD.md. The programs compile these sources
+# the project's docs/BUILD.md. The programs compile these sources
 # directly into their own Amiga builds (Makefile.amiga-cross / Build-Amiga
 # of each app); this file is a standalone compile check of the library.
 #
@@ -16,7 +16,7 @@
 # runtime include dir is searched first — verified by hand while writing
 # this Makefile.
 #
-# Build:  export VBCC=/path/to/vbcc     (see docs/BUILD.md)
+# Build:  export VBCC=/path/to/vbcc     (see the project's docs/BUILD.md)
 #         make -f Makefile.amiga-cross
 
 VBCC    ?= /opt/vbcc

@@ -8,7 +8,7 @@
  * equally usable by any future console feature that wants both sides of
  * a copy expressed uniformly.
  *
- * Copy of the old client/panel.c (docs/05_Refactoring_Client_Handler.md,
+ * Copy of the old client/panel.c (AmiCloud docs/design/05_Refactoring_Client_Handler.md,
  * M5) with the two-way sync engine removed (now libcloudsync) and
  * progress_reset()/progress_prefix() removed (now libcloudcore's
  * progress.c — this file just calls them).

@@ -52,8 +52,8 @@
  *           amicloud_list()); WebDAV puts its ETag here and leaves md5
  *           empty.
  *
- * revision/id are AmiCloud-only content-revision bookkeeping (docs/
- * architecture/07_Sync_Metadaten.md); a backend with no equivalent
+ * revision/id are AmiCloud-only content-revision bookkeeping (AmiOwnCloud docs/design/
+ * 07_Sync_Metadaten.md); a backend with no equivalent
  * (WebDAV) always leaves both at 0, which is exactly the "unknown, fall
  * back to md5/token comparison" case the merge logic already handles. */
 typedef struct {

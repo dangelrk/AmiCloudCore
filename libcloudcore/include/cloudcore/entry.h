@@ -23,9 +23,9 @@ typedef struct {
     char modified[24]; /* ISO-8601 UTC, e.g. "2026-06-25T14:30:00Z"; "" if missing */
     long mtime;         /* UTC epoch seconds; 0 if missing */
     char md5[33];       /* 32 hex chars; "" for directories/missing value */
-    long protection;    /* raw Amiga bits, RWED active-low, docs/API.md */
+    long protection;    /* raw Amiga bits, RWED active-low, AmiCloud docs/api/API.md */
     char comment[80];   /* "" if no comment set */
-    /* Server-side sync metadata (docs/architecture/07_Sync_Metadaten.md) --
+    /* Server-side sync metadata (AmiOwnCloud docs/design/07_Sync_Metadaten.md) --
      * all three 0 if the server doesn't send them (older deployment) or
      * the path has no metadata row yet; callers fall back to plain MD5
      * comparison in that case. */
@@ -52,7 +52,7 @@ typedef struct {
     long change_seq;
 } AcInfo;
 
-/* One row from cmd_changes() (action=changes, docs/architecture/
+/* One row from cmd_changes() (action=changes, AmiOwnCloud docs/design/
  * 07_Sync_Metadaten.md) -- the delta feed. Unlike AcEntry, entries here
  * are not scoped to one directory, so `path` is a full '/'-prefixed
  * path and needs the same length budget as any other full remote path
@@ -69,7 +69,7 @@ typedef struct {
     int  deleted;   /* 1 = tombstone (soft-deleted on the server) */
 } AcChange;
 
-/* One row from cmd_search() (action=search, docs/architecture/
+/* One row from cmd_search() (action=search, AmiCloud docs/design/
  * search-plan.md) -- like AcChange, not scoped to one directory, so
  * `path` is a full '/'-prefixed path. Mirrors common's local-search
  * SearchHit (path/is_dir/size/mtime) so Commander can display cloud and

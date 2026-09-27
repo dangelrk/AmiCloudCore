@@ -5,7 +5,7 @@
  * md5.c — portable MD5 (RFC 1321) reference implementation, written in
  * plain C89 from the public algorithm description. No external
  * dependencies (no AmiSSL/libcurl/OpenSSL) so it links identically on all
- * four platforms — see docs/interactive-shell-plan.html section 18.1.
+ * four platforms — see AmiCloud docs/design/interactive-shell-plan.html section 18.1.
  */
 #include "md5.h"
 #include <string.h>

@@ -7,7 +7,7 @@
 /*
  * md5.h — portable MD5 (RFC 1321), C89, no external dependencies.
  * Used for transfer verification (get/put) and as the comparison basis
- * for `sync` — see docs/interactive-shell-plan.html section 18.
+ * for `sync` — see AmiCloud docs/design/interactive-shell-plan.html section 18.
  *
  * Streaming API so large files can be hashed block-wise (fixed buffer)
  * instead of loaded whole into RAM — important on the Amiga.

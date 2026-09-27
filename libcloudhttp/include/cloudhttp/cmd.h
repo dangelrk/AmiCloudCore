@@ -48,17 +48,17 @@ int cmd_rename(const AcConfig *cfg, const char *from_path, const char *to_path);
 
 /* Sets a remote file's Amiga filecomment (action=setcomment&comment=,
  * URL-encoded internally; server truncates >79 chars and strips control
- * characters -- see docs/API.md). Empty comment clears it. Returns 0 on
+ * characters -- see AmiCloud docs/api/API.md). Empty comment clears it. Returns 0 on
  * success. */
 int cmd_setcomment(const AcConfig *cfg, const char *remote_path, const char *comment);
 
 /* Sets a remote file's raw Amiga protection bits (action=setprotect&
  * bits=) -- passed through unchanged, RWED active-low, never inverted
- * (docs/API.md). Returns 0 on success. */
+ * (AmiCloud docs/api/API.md). Returns 0 on success. */
 int cmd_setprotect(const AcConfig *cfg, const char *remote_path, long bits);
 
 /* ------------------------------------------------------------------ */
-/* Additions for amicloud-shell (see docs/interactive-shell-plan.html)  */
+/* Additions for amicloud-shell (see AmiCloud docs/design/interactive-shell-plan.html)  */
 /* ------------------------------------------------------------------ */
 
 /* Structured (non-printing) directory listing. On success (1) *out points
@@ -70,12 +70,12 @@ void cmd_entries_free(AcEntry *entries);
 /* Silent remote checks/helpers (no stdout/stderr output on the "normal"
  * negative outcome — callers decide how to report). global_revision_out
  * (may be NULL) receives the server's current per-user change counter
- * (docs/architecture/07_Sync_Metadaten.md) -- 0 on an older server that
+ * (AmiOwnCloud docs/design/07_Sync_Metadaten.md) -- 0 on an older server that
  * doesn't send it. */
 int cmd_is_dir(const AcConfig *cfg, const char *remote_path);
 int cmd_status(const AcConfig *cfg, char *version_out, size_t version_sz, long *global_revision_out);
 
-/* Delta source for a metadata-based sync (docs/architecture/
+/* Delta source for a metadata-based sync (AmiOwnCloud docs/design/
  * 07_Sync_Metadaten.md): every row for this user with change_seq >
  * since, tombstones (AcChange.deleted) included -- unlike cmd_list_raw(),
  * not scoped to one directory. global_revision_out (may be NULL)
@@ -85,7 +85,7 @@ int cmd_status(const AcConfig *cfg, char *version_out, size_t version_sz, long *
 int  cmd_changes(const AcConfig *cfg, long since, AcChange **out, int *out_n, long *global_revision_out);
 void cmd_changes_free(AcChange *changes);
 
-/* Server-side name search (action=search, docs/architecture/search-plan.md):
+/* Server-side name search (action=search, AmiCloud docs/design/search-plan.md):
  * matches the "*"/"?"/"#?" glob pattern against the basename of every live
  * row under root (recursive; root=NULL or "/" = whole cloud), scoped to
  * this user. dirs_too=0 restricts hits to files. truncated_out (may be
@@ -114,7 +114,7 @@ int cmd_setdate_mtime(const AcConfig *cfg, const char *remote_path, long mtime_e
 
 /* ------------------------------------------------------------------ */
 /* In-memory transfer helpers for the CLOUD: handler's worker process   */
-/* (docs/handler-plan.md Stufe 2) -- the worker already needs the whole */
+/* (AmiCloud docs/design/handler-plan.md Stufe 2) -- the worker already needs the whole */
 /* file in RAM either way (Stage 2's design has no streaming/partial    */
 /* reads), so these skip cmd_get()/cmd_put()'s local-file round trip.   */
 /* ------------------------------------------------------------------ */
