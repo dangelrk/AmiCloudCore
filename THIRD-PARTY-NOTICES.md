@@ -14,6 +14,11 @@ Fremdkomponente, die unter ihrer eigenen, GPL-kompatiblen Lizenz steht:
   entfernt (kollidierte mit der libc-Deklaration, Parson nutzt sie nicht).
   Details im Kommentar an dieser Stelle.
 
+`THIRD-PARTY-NOTICES.txt` enthält denselben Hinweis samt vollem
+MIT-Text als reine Textdatei; `make dist-amiga` legt sie als
+`THIRD-PARTY-NOTICES` in jede Amiga-Installationsschublade, weil die
+Programme Parson enthalten.
+
 Alle übrigen Dateien (einschließlich der MD5- und Base64-Implementierung
 in `libcloudcore/`) sind eigener Code des Projekts.
 

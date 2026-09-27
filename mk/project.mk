@@ -72,7 +72,9 @@ verify-amiga-script:
 	VC_CONFIG=$(VC_CONFIG) python3 core/tools/gen-build-amiga.py --name $(PROJECT) --verify
 
 # Amiga installation drawer: programs, AmigaGuide manual(s), example
-# configuration, mountlists and the install script(s) from install/amiga/.
+# configuration, mountlists, the install script(s) from install/amiga/,
+# LICENSE (GPL) and THIRD-PARTY-NOTICES (full MIT text of Parson, which
+# the programs contain -- required when distributing the binaries).
 dist-amiga: amiga
 	rm -rf $(DIST_DIR)
 	mkdir -p $(DIST_DIR)/C $(DIST_DIR)/Docs $(DIST_DIR)/Examples
@@ -83,6 +85,7 @@ dist-amiga: amiga
 	@for x in $(DIST_EXTRA); do \
 	    f=$${x%%:*}; d=$(DIST_DIR)/$${x#*:}; mkdir -p "$$d" && cp "$$f" "$$d/"; done
 	cp LICENSE $(DIST_DIR)/LICENSE
+	cp core/THIRD-PARTY-NOTICES.txt $(DIST_DIR)/THIRD-PARTY-NOTICES
 	@rm -f $(BUILD_DIR)/$(PROJECT).lha; \
 	if command -v lha >/dev/null 2>&1 && \
 	   ( cd $(BUILD_DIR)/dist && lha -ao5q ../$(PROJECT).lha $(PROJECT) ) >/dev/null 2>&1; then \
