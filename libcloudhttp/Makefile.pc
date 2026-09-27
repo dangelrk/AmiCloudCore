@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Ronny Krueger
+# libcloudhttp — HTTP/HTTPS transport (libcurl) + cmd_*() API (list/get/
+# put/del/info/mkdir/rename/setcomment/setprotect/setdate/*_buf/*_raw).
+# The only two things allowed to know the server's wire contract (auth
+# scheme, api.php?action=... URL shape) — see docs/05, module-encapsulation.
+#
+# Build:   make -f Makefile.pc
+# Output:  <repo-root>/lib/pc/libcloudhttp.a (NOT bin/ — bin/ is
+#          executables only, so it matches the Amiga cross-compile build,
+#          which never puts .a/.lib archives in bin/amiga either).
+
+CC      = gcc
+CORE_INC = ../libcloudcore/include/cloudcore
+INCDIR   = include/cloudhttp
+
+PKG_CF  := $(shell pkg-config --cflags libcurl 2>/dev/null)
+ifeq ($(PKG_CF),)
+  PKG_CF := -I/opt/homebrew/include -I/usr/local/include
+endif
+
+CFLAGS  = -O2 -Wall -Wextra -std=c99 -I$(INCDIR) -I$(CORE_INC) $(PKG_CF)
+AR      = ar
+ARFLAGS = rcs
+
+OBJDIR = obj/pc
+LIBDIR ?= ../../lib/pc
+
+SRCS = cmd webdavcmd http_pc
+OBJS = $(SRCS:%=$(OBJDIR)/%.o)
+
+LIB = $(LIBDIR)/libcloudhttp.a
+
+all: $(LIB)
+
+$(LIB): $(OBJS) | $(LIBDIR)
+	$(AR) $(ARFLAGS) $@ $(OBJS)
+
+$(OBJDIR)/%.o: src/%.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR) $(LIBDIR):
+	mkdir -p $@
+
+clean:
+	rm -rf $(OBJDIR)
+	rm -f $(LIB)
+
+.PHONY: all clean

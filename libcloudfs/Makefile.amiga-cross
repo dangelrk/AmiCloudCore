@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Ronny Krueger
+# libcloudfs — AmigaOS 3.x (VBCC), CROSS-compiled from a host (macOS/
+# Linux/Windows) using the toolchain described in
+# docs/BUILD.md. The programs compile these sources
+# directly into their own Amiga builds (Makefile.amiga-cross / Build-Amiga
+# of each app); this file is a standalone compile check of the library.
+#
+# No oml on the host, so this only builds .o files (into obj/amiga/),
+# no libcloudfs.lib — see libcloudcore/Makefile.amiga-cross for why.
+#
+# Build:  export VBCC=/path/to/vbcc     (see docs/BUILD.md)
+#         make -f Makefile.amiga-cross
+
+VBCC    ?= /opt/vbcc
+CC       = $(VBCC)/bin/vc
+TARGET   = +aos68k
+CPU      = 68000
+
+RUNTIME_INC = $(VBCC)/targets/m68k-amigaos/include
+NDK_INC     = $(VBCC)/sdk/NDK_3.2/Include_H
+
+CORE_INC = ../libcloudcore/include/cloudcore
+INCDIR   = include/cloudfs
+CFLAGS   = $(TARGET) -O2 -DAMIGA -DPLATFORM_AMIGA -I$(INCDIR) -I$(CORE_INC) \
+           -I$(NDK_INC) -I$(RUNTIME_INC) -cpu=$(CPU)
+
+OBJDIR = obj/amiga
+SRCS   = localfs_amiga localfs_util pattern_amiga
+OBJS   = $(SRCS:%=$(OBJDIR)/%.o)
+
+all: $(OBJDIR) $(OBJS)
+
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
+$(OBJDIR)/%.o: src/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+clean:
+	rm -rf $(OBJDIR)
+
+.PHONY: all clean

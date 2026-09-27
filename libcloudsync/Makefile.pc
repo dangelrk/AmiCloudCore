@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Ronny Krueger
+# libcloudsync — two-way local<->cloud folder sync engine (cloudsync_run,
+# ex-panel_sync). Linked by AmiCloud's apps/cloudsync one-shot CLI (roadmap
+# phase 5's future sync commodity would wrap that in a background daemon).
+#
+# Build:   make -f Makefile.pc
+# Output:  <repo-root>/lib/pc/libcloudsync.a (NOT bin/ — bin/ is
+#          executables only, so it matches the Amiga cross-compile build,
+#          which never puts .a/.lib archives in bin/amiga either).
+
+CC        = gcc
+CORE_INC  = ../libcloudcore/include/cloudcore
+HTTP_INC  = ../libcloudhttp/include/cloudhttp
+FS_INC    = ../libcloudfs/include/cloudfs
+INCDIR    = include/cloudsync
+
+PKG_CF   := $(shell pkg-config --cflags libcurl 2>/dev/null)
+ifeq ($(PKG_CF),)
+  PKG_CF := -I/opt/homebrew/include -I/usr/local/include
+endif
+
+CFLAGS  = -O2 -Wall -Wextra -std=c99 -I$(INCDIR) -I$(CORE_INC) -I$(HTTP_INC) -I$(FS_INC) $(PKG_CF)
+AR      = ar
+ARFLAGS = rcs
+
+OBJDIR = obj/pc
+LIBDIR ?= ../../lib/pc
+
+SRCS = sync syncstate webdav
+OBJS = $(SRCS:%=$(OBJDIR)/%.o)
+
+LIB = $(LIBDIR)/libcloudsync.a
+
+all: $(LIB)
+
+$(LIB): $(OBJS) | $(LIBDIR)
+	$(AR) $(ARFLAGS) $@ $(OBJS)
+
+$(OBJDIR)/%.o: src/%.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR) $(LIBDIR):
+	mkdir -p $@
+
+clean:
+	rm -rf $(OBJDIR)
+	rm -f $(LIB)
+
+.PHONY: all clean

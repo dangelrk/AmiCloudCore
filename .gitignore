@@ -1,0 +1,16 @@
+# Build-Ausgaben (werden von den einbindenden Projekten erzeugt)
+obj/
+bin/
+lib/
+build/
+*.o
+*.a
+*.lib
+__pycache__/
+
+# Editor/OS
+.DS_Store
+.qtcreator/
+.vscode/
+.idea/
+*.info

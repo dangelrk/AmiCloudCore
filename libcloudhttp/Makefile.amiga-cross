@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Ronny Krueger
+# libcloudhttp — AmigaOS 3.x (VBCC), CROSS-compiled from a host (macOS/
+# Linux/Windows) using the toolchain described in
+# docs/BUILD.md. The programs compile these sources
+# directly into their own Amiga builds (Makefile.amiga-cross / Build-Amiga
+# of each app); this file is a standalone compile check of the library.
+#
+# No oml on the host, so this only builds .o files (into obj/amiga/),
+# no libcloudhttp.lib — see libcloudcore/Makefile.amiga-cross for why.
+#
+# IMPORTANT include order: $(AMISSL_INC) MUST come before $(RUNTIME_INC).
+# vbcc's own bundled targets/m68k-amigaos/include/proto/amissl.h ships a
+# stub that conflicts with the real AmiSSL-v5 SDK's proto/amissl.h
+# ("error 272: macro 'ERR_put_error' redefined unidentically") if the
+# runtime include dir is searched first — verified by hand while writing
+# this Makefile.
+#
+# Build:  export VBCC=/path/to/vbcc     (see docs/BUILD.md)
+#         make -f Makefile.amiga-cross
+
+VBCC    ?= /opt/vbcc
+CC       = $(VBCC)/bin/vc
+TARGET   = +aos68k
+CPU      = 68000
+
+RUNTIME_INC  = $(VBCC)/targets/m68k-amigaos/include
+NDK_INC      = $(VBCC)/sdk/NDK_3.2/Include_H
+NET_INC      = $(VBCC)/sdk/Roadshow/netinclude
+AMISSL_INC   = $(VBCC)/sdk/AmiSSL-v5/Developer/include
+
+CORE_INC = ../libcloudcore/include/cloudcore
+INCDIR   = include/cloudhttp
+CFLAGS   = $(TARGET) -O2 -DAMIGA -DPLATFORM_AMIGA \
+           -I$(INCDIR) -I$(CORE_INC) \
+           -I$(AMISSL_INC) -I$(NET_INC) -I$(NDK_INC) -I$(RUNTIME_INC) \
+           -cpu=$(CPU)
+
+OBJDIR = obj/amiga
+SRCS   = cmd webdavcmd http_amiga
+OBJS   = $(SRCS:%=$(OBJDIR)/%.o)
+
+all: $(OBJDIR) $(OBJS)
+
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
+$(OBJDIR)/%.o: src/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+clean:
+	rm -rf $(OBJDIR)
+
+.PHONY: all clean

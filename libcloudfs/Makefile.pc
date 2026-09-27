@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Ronny Krueger
+# libcloudfs — local filesystem adapter (localfs_pc.c on PC, localfs_amiga.c
+# on Amiga, localfs_util.c shared) + wildcard pattern matching.
+#
+# Build:   make -f Makefile.pc
+# Output:  <repo-root>/lib/pc/libcloudfs.a (NOT bin/ — bin/ is
+#          executables only, so it matches the Amiga cross-compile build,
+#          which never puts .a/.lib archives in bin/amiga either).
+
+CC       = gcc
+CORE_INC = ../libcloudcore/include/cloudcore
+INCDIR   = include/cloudfs
+CFLAGS   = -O2 -Wall -Wextra -std=c99 -I$(INCDIR) -I$(CORE_INC)
+AR       = ar
+ARFLAGS  = rcs
+
+OBJDIR = obj/pc
+LIBDIR ?= ../../lib/pc
+
+SRCS = localfs_pc localfs_util pattern_pc
+OBJS = $(SRCS:%=$(OBJDIR)/%.o)
+
+LIB = $(LIBDIR)/libcloudfs.a
+
+all: $(LIB)
+
+$(LIB): $(OBJS) | $(LIBDIR)
+	$(AR) $(ARFLAGS) $@ $(OBJS)
+
+$(OBJDIR)/%.o: src/%.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR) $(LIBDIR):
+	mkdir -p $@
+
+clean:
+	rm -rf $(OBJDIR)
+	rm -f $(LIB)
+
+.PHONY: all clean

@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Ronny Krueger
+# libcloudcore — shared types, config parsing, base64/MD5/JSON, UI hooks,
+# Amiga DateStamp<->epoch conversion. No network, no filesystem walking.
+#
+# Build:   make -f Makefile.pc
+# Output:  <repo-root>/lib/pc/libcloudcore.a (NOT bin/ — bin/ is
+#          executables only, so it matches the Amiga cross-compile build,
+#          which never puts .a/.lib archives in bin/amiga either).
+
+CC      = gcc
+INCDIR  = include/cloudcore
+CFLAGS  = -O2 -Wall -Wextra -std=c99 -I$(INCDIR)
+AR      = ar
+ARFLAGS = rcs
+
+OBJDIR = obj/pc
+LIBDIR ?= ../../lib/pc
+
+SRCS = config base64 parson md5 ui_hooks cloudtime progress wbstartup
+OBJS = $(SRCS:%=$(OBJDIR)/%.o)
+
+LIB = $(LIBDIR)/libcloudcore.a
+
+all: $(LIB)
+
+$(LIB): $(OBJS) | $(LIBDIR)
+	$(AR) $(ARFLAGS) $@ $(OBJS)
+
+$(OBJDIR)/%.o: src/%.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR) $(LIBDIR):
+	mkdir -p $@
+
+clean:
+	rm -rf $(OBJDIR)
+	rm -f $(LIB)
+
+.PHONY: all clean
