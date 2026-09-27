@@ -48,6 +48,15 @@ $(OBJDIR):
 $(OBJDIR)/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# Header dependencies: vbcc writes no dependency files usable here (its
+# -deps output lands next to the sources, i.e. inside core/), so every
+# object depends on all project headers on its include path -- a changed
+# header rebuilds the whole program. SDK headers under $(VBCC) are left out.
+PROJECT_HEADERS = $(wildcard src/*.h $(patsubst -I%,%/*.h,$(filter-out -I$(VBCC)/%,\
+                  $(filter -I%,$(CFLAGS) $(HANDLER_CFLAGS) $(WORKER_CFLAGS)))))
+$(OWN_OBJS) $(CORE_OBJS) $(HTTP_OBJS) $(FS_OBJS) $(SYNC_OBJS) $(VCS_OBJS) \
+$(GUILIB_OBJS) $(HANDLER_OBJS) $(WORKER_OBJS) $(OBJS): $(PROJECT_HEADERS)
+
 clean:
 	rm -rf $(OBJDIR)
 
