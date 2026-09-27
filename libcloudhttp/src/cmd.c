@@ -639,6 +639,29 @@ int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path
     int ok;
     char md5hex[33];
 
+    make_auth(auth, sizeof(auth), cfg);
+    if (remote_path && *remote_path) {
+        full_path(rpath, sizeof(rpath), cfg, remote_path);
+    } else {
+        const char *slash = strrchr(local_path, '/');
+#ifdef PLATFORM_WIN
+        const char *bslash = strrchr(local_path, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+#endif
+        const char *name = slash ? slash + 1 : local_path;
+        /* An AmigaDOS path without any '/' ("DH0:file", "RAM:file")
+         * leaves the volume/device prefix in the derived name, which the
+         * server rejects -- refuse up front with a clear message instead
+         * of sending a request that can only fail. */
+        if (strchr(name, ':') || !*name) {
+            ui_notify(UI_ERROR, "amicloudcore: put: cannot derive a remote name from '%s' -- "
+                      "please give the remote path explicitly (put <local> <remote>)", local_path);
+            return 1;
+        }
+        snprintf(rpath, sizeof(rpath), "%s/%s",
+                 strcmp(cfg->basepath, "/") == 0 ? "" : cfg->basepath, name);
+    }
+
     /* &md5= lets the server reject a corrupted upload with 422 before it
      * ever hits disk (plan section 18.2/18.3); an older server just
      * ignores the unknown parameter. Computed via its own streaming pass
@@ -658,19 +681,6 @@ int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path
     fseek(fp, 0, SEEK_SET);
     if (fsize < 0) { fclose(fp); ui_notify(UI_ERROR, "amicloudcore: cannot determine file size"); return 1; }
 
-    make_auth(auth, sizeof(auth), cfg);
-    if (remote_path && *remote_path) {
-        full_path(rpath, sizeof(rpath), cfg, remote_path);
-    } else {
-        const char *slash = strrchr(local_path, '/');
-#ifdef PLATFORM_WIN
-        const char *bslash = strrchr(local_path, '\\');
-        if (bslash && (!slash || bslash > slash)) slash = bslash;
-#endif
-        const char *name = slash ? slash + 1 : local_path;
-        snprintf(rpath, sizeof(rpath), "%s/%s",
-                 strcmp(cfg->basepath, "/") == 0 ? "" : cfg->basepath, name);
-    }
     snprintf(url, sizeof(url), "%s/api.php?action=upload&path=%s&md5=%s",
              cfg->server, rpath, md5hex);
 
