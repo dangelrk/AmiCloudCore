@@ -643,18 +643,20 @@ int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path
     if (remote_path && *remote_path) {
         full_path(rpath, sizeof(rpath), cfg, remote_path);
     } else {
-        const char *slash = strrchr(local_path, '/');
+        /* Remote name = last path component. Besides '/', an AmigaDOS
+         * volume/device prefix ends at ':' ("DH0:file" -> "file"); the
+         * server never accepts ':' in a name, so it is treated as a
+         * separator on every platform. */
+        const char *name = local_path, *q;
+        for (q = local_path; *q; q++) {
+            if (*q == '/' || *q == ':'
 #ifdef PLATFORM_WIN
-        const char *bslash = strrchr(local_path, '\\');
-        if (bslash && (!slash || bslash > slash)) slash = bslash;
+                || *q == '\\'
 #endif
-        const char *name = slash ? slash + 1 : local_path;
-        /* An AmigaDOS path without any '/' ("DH0:file", "RAM:file")
-         * leaves the volume/device prefix in the derived name, which the
-         * server rejects -- refuse up front with a clear message instead
-         * of sending a request that can only fail. */
-        if (strchr(name, ':') || !*name) {
-            ui_notify(UI_ERROR, "amicloudcore: put: cannot derive a remote name from '%s' -- "
+               ) name = q + 1;
+        }
+        if (!*name) {
+            ui_notify(UI_ERROR, "amicloudcore: put: '%s' names no file -- "
                       "please give the remote path explicitly (put <local> <remote>)", local_path);
             return 1;
         }
