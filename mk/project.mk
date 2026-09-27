@@ -96,7 +96,9 @@ dist-amiga: amiga
 install:
 	@test -d bin/pc || { echo "Erst 'make pc' (und ggf. 'make qt') ausfuehren."; exit 1; }
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
-	for f in bin/pc/*; do [ -f "$$f" ] && install -m 755 "$$f" $(DESTDIR)$(PREFIX)/bin/; done
+	@set -e; for f in bin/pc/*; do \
+	    if [ -f "$$f" ]; then echo "install $$f"; install -m 755 "$$f" $(DESTDIR)$(PREFIX)/bin/; fi; \
+	done
 
 clean:
 	-for d in $(PC_DIRS); do $(MAKE) -C $$d -f Makefile.pc clean; done
