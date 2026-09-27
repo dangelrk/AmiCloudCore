@@ -266,7 +266,7 @@ HttpResponse *http_request_hdr(const char *method, const char *url,
     if (rc == CURLE_OK) {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, (long *)&resp->status_code);
     } else {
-        fprintf(stderr, "curl error: %s\n", curl_easy_strerror(rc));
+        fprintf(stderr, "amicloudcore: curl error: %s\n", curl_easy_strerror(rc));
         resp->status_code = 0;
     }
 
@@ -308,7 +308,7 @@ HttpResponse *http_download(const char *url, const char *auth,
     if (rc == CURLE_OK) {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, (long *)&resp->status_code);
     } else {
-        if (!pc.aborted) fprintf(stderr, "curl error: %s\n", curl_easy_strerror(rc));
+        if (!pc.aborted) fprintf(stderr, "amicloudcore: curl error: %s\n", curl_easy_strerror(rc));
         resp->status_code = 0;
     }
     resp->aborted = pc.aborted;
@@ -356,7 +356,7 @@ HttpResponse *http_upload(const char *url, const char *auth,
     if (rc == CURLE_OK) {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, (long *)&resp->status_code);
     } else {
-        if (!pc.aborted) fprintf(stderr, "curl error: %s\n", curl_easy_strerror(rc));
+        if (!pc.aborted) fprintf(stderr, "amicloudcore: curl error: %s\n", curl_easy_strerror(rc));
         resp->status_code = 0;
     }
     resp->aborted = pc.aborted;
@@ -431,7 +431,7 @@ HttpResponse *http_upload_hdr(const char *method, const char *url, const char *a
     if (rc == CURLE_OK) {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, (long *)&resp->status_code);
     } else {
-        if (!pc.aborted) fprintf(stderr, "curl error: %s\n", curl_easy_strerror(rc));
+        if (!pc.aborted) fprintf(stderr, "amicloudcore: curl error: %s\n", curl_easy_strerror(rc));
         resp->status_code = 0;
     }
     resp->aborted = pc.aborted;

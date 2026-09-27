@@ -284,7 +284,7 @@ void panel_copy_file(PanelSource ssrc, const AcConfig *scfg, const char *spath,
          * (do_copy()/doCopy() already reject Cloud->Cloud and don't offer
          * Local->Local before ever reaching here). */
         c->pr.err++;
-        ui_notify(UI_ERROR, "amicloud: unsupported copy direction for %s", name);
+        ui_notify(UI_ERROR, "amicloudcore: unsupported copy direction for %s", name);
     }
 }
 
@@ -322,12 +322,12 @@ void panel_get_dir(const AcConfig *cfg, const char *remote_path,
     /* mkdir_p, nicht mkdir: local_path kann auf ein anderes Laufwerk mit
      * fehlenden Elternverzeichnissen zeigen (get -r fotos Work:2026/fotos). */
     if (!localfs_mkdir_p(local_path)) {
-        ui_notify(UI_ERROR, "amicloud: cannot create local directory %s", local_path);
+        ui_notify(UI_ERROR, "amicloudcore: cannot create local directory %s", local_path);
         c->pr.err++;
         return;
     }
     if (!cmd_list_raw(cfg, remote_path, &entries, &n)) {
-        ui_notify(UI_ERROR, "amicloud: cannot list %s", remote_path);
+        ui_notify(UI_ERROR, "amicloudcore: cannot list %s", remote_path);
         c->pr.err++;
         return;
     }
@@ -405,11 +405,11 @@ void panel_put_dir(const AcConfig *cfg, const char *local_path,
     }
 
     if (cmd_mkdir_quiet(cfg, remote_path) != 0)
-        ui_notify(UI_WARN, "amicloud: warning: could not create %s (continuing)", remote_path);
+        ui_notify(UI_WARN, "amicloudcore: warning: could not create %s (continuing)", remote_path);
 
     d = localfs_opendir(local_path);
     if (!d) {
-        ui_notify(UI_ERROR, "amicloud: cannot open local directory %s", local_path);
+        ui_notify(UI_ERROR, "amicloudcore: cannot open local directory %s", local_path);
         c->pr.err++;
         cmd_entries_free(dst_entries);
         return;
@@ -460,7 +460,7 @@ int panel_read(PanelSource src, const AcConfig *cfg, const char *path, PanelList
         int cap = 0;
 
         if (!d) {
-            ui_notify(UI_ERROR, "amicloud: cannot open local directory %s", path);
+            ui_notify(UI_ERROR, "amicloudcore: cannot open local directory %s", path);
             return 0;
         }
         while (localfs_readdir(d, &e)) {

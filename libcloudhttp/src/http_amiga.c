@@ -240,7 +240,7 @@ static int resolve_host(const char *host, struct sockaddr_in *addr)
     HLOG("dns: resolving '%s'...\n", host);
     {
         const struct hostent *he = gethostbyname((char *)host);
-        if (!he) { HERR("amicloud: cannot resolve '%s'\n", host); return 0; }
+        if (!he) { HERR("amicloudcore: cannot resolve '%s'\n", host); return 0; }
         memcpy(&addr->sin_addr, he->h_addr_list[0], 4);
         /* Cache for all subsequent calls in packet_loop */
         g_dns_cache_addr = addr->sin_addr;
@@ -275,7 +275,7 @@ static SSL *tls_connect(const char *host, int port, int verify,
 
     HLOG("tls: resolving '%s'...\n", host);
     if (!resolve_host(host, &addr)) {
-        HERR("amicloud: cannot resolve '%s'\n", host);
+        HERR("amicloudcore: cannot resolve '%s'\n", host);
         return NULL;
     }
     HLOG("tls: resolved OK\n");
@@ -283,7 +283,7 @@ static SSL *tls_connect(const char *host, int port, int verify,
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock == INVALID_SOCKET) {
-        HERR("amicloud: socket() failed\n");
+        HERR("amicloudcore: socket() failed\n");
         return NULL;
     }
     HLOG("tls: socket fd=%ld\n", (long)sock);
@@ -324,14 +324,14 @@ static SSL *tls_connect(const char *host, int port, int verify,
         HLOG("tls: WaitSelect returned %d\n", sel);
 
         if (sel <= 0) {
-            HERR("amicloud: connect to %s:%d timed out\n", host, port);
+            HERR("amicloudcore: connect to %s:%d timed out\n", host, port);
             CloseSocket(sock);
             return NULL;
         }
         soerr = 0; soerr_len = (LONG)sizeof(soerr);
         getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&soerr, (void *)&soerr_len);
         if (soerr != 0) {
-            HERR("amicloud: connect to %s:%d failed (err %d)\n", host, port, soerr);
+            HERR("amicloudcore: connect to %s:%d failed (err %d)\n", host, port, soerr);
             CloseSocket(sock);
             return NULL;
         }
@@ -347,7 +347,7 @@ static SSL *tls_connect(const char *host, int port, int verify,
     HLOG("tls: SSL_new...\n");
     ssl = SSL_new(g_ssl_ctx);
     if (!ssl) {
-        HERR("amicloud: SSL_new failed\n");
+        HERR("amicloudcore: SSL_new failed\n");
         CloseSocket(sock);
         return NULL;
     }
@@ -359,7 +359,7 @@ static SSL *tls_connect(const char *host, int port, int verify,
 
     HLOG("tls: SSL_connect...\n");
     if (SSL_connect(ssl) != 1) {
-        HERR("amicloud: TLS handshake with %s failed\n", host);
+        HERR("amicloudcore: TLS handshake with %s failed\n", host);
         SSL_free(ssl);
         CloseSocket(sock);
         return NULL;
@@ -476,7 +476,7 @@ static int read_more(SSL *ssl, AC_SOCKET sock, char **buf, size_t *size,
             sel = WaitSelect(sock + 1, &rfds, NULL, NULL, (void *)&tv, NULL);
             HLOG("read: WaitSelect=%d\n", sel);
             if (sel <= 0) {
-                HERR("amicloud: read timeout (30s) after %lu bytes\n", (unsigned long)*size);
+                HERR("amicloudcore: read timeout (30s) after %lu bytes\n", (unsigned long)*size);
                 return 0;
             }
         }
@@ -575,7 +575,7 @@ static int read_body_chunked(SSL *ssl, AC_SOCKET sock, char **buf, size_t *size,
             char *p;
             chunk_size = strtol(*buf + cursor, &p, 16); /* stops at ';ext' or '\r' on its own */
             if (p == *buf + cursor || chunk_size < 0) {
-                HERR("amicloud: malformed chunk size\n");
+                HERR("amicloudcore: malformed chunk size\n");
                 return 0;
             }
             cursor = (size_t)(eol - *buf) + 1; /* past the size line's terminating \n */
@@ -766,7 +766,7 @@ static HttpResponse *do_request(const char *method, const char *url,
     HLOG("http: %s %s\n", method, url);
 
     if (!parse_url(url, host, sizeof(host), &port, path, sizeof(path))) {
-        HERR("amicloud: invalid URL: %s\n", url);
+        HERR("amicloudcore: invalid URL: %s\n", url);
         return NULL;
     }
     HLOG("http: host=%s port=%d path=%s\n", host, port, path);
@@ -851,7 +851,7 @@ static HttpResponse *do_request(const char *method, const char *url,
             }
             free(auth_val);
             if (req_len >= (int)sizeof(req_head)) {
-                HERR("amicloud: request header too large\n");
+                HERR("amicloudcore: request header too large\n");
                 tls_close(ssl, sock);
                 return NULL;
             }
@@ -913,7 +913,7 @@ static HttpResponse *do_request(const char *method, const char *url,
                 HLOG("http: reused connection was stale (write failed) -- retrying fresh\n");
                 continue;
             }
-            HERR("amicloud: failed to send request to %s\n", host);
+            HERR("amicloudcore: failed to send request to %s\n", host);
             return NULL;
         }
 
@@ -935,7 +935,7 @@ static HttpResponse *do_request(const char *method, const char *url,
         }
 
         if (!raw) {
-            HERR("amicloud: no response received from %s\n", host);
+            HERR("amicloudcore: no response received from %s\n", host);
             tls_close(ssl, sock);
             return NULL;
         }
@@ -1043,7 +1043,7 @@ int http_init(void)
     HLOG("http_init: opening utility.library\n");
     UtilityBase = OpenLibrary("utility.library", 0);
     if (!UtilityBase) {
-        HERR("amicloud: cannot open utility.library\n");
+        HERR("amicloudcore: cannot open utility.library\n");
         return 0;
     }
     HLOG("http_init: utility.library OK\n");
@@ -1051,7 +1051,7 @@ int http_init(void)
     HLOG("http_init: opening bsdsocket.library\n");
     SocketBase = OpenLibrary("bsdsocket.library", 4L);
     if (!SocketBase) {
-        HERR("amicloud: cannot open bsdsocket.library\n");
+        HERR("amicloudcore: cannot open bsdsocket.library\n");
         CloseLibrary(UtilityBase); UtilityBase = NULL;
         return 0;
     }
@@ -1060,7 +1060,7 @@ int http_init(void)
     HLOG("http_init: opening amisslmaster.library\n");
     AmiSSLMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
     if (!AmiSSLMasterBase) {
-        HERR("amicloud: cannot open amisslmaster.library (AmiSSL 5 required)\n");
+        HERR("amicloudcore: cannot open amisslmaster.library (AmiSSL 5 required)\n");
         CloseLibrary(SocketBase);  SocketBase  = NULL;
         CloseLibrary(UtilityBase); UtilityBase = NULL;
         return 0;
@@ -1069,7 +1069,7 @@ int http_init(void)
 
     HLOG("http_init: InitAmiSSLMaster\n");
     if (!InitAmiSSLMaster(AMISSL_CURRENT_VERSION, TRUE)) {
-        HERR("amicloud: AmiSSL version too old\n");
+        HERR("amicloudcore: AmiSSL version too old\n");
         CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL;
         CloseLibrary(SocketBase);       SocketBase       = NULL;
         CloseLibrary(UtilityBase);      UtilityBase      = NULL;
@@ -1080,7 +1080,7 @@ int http_init(void)
     HLOG("http_init: OpenAmiSSL\n");
     AmiSSLBase = OpenAmiSSL();
     if (!AmiSSLBase) {
-        HERR("amicloud: OpenAmiSSL failed\n");
+        HERR("amicloudcore: OpenAmiSSL failed\n");
         CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL;
         CloseLibrary(SocketBase);       SocketBase       = NULL;
         CloseLibrary(UtilityBase);      UtilityBase      = NULL;
@@ -1092,7 +1092,7 @@ int http_init(void)
     if (InitAmiSSL(AmiSSL_ErrNoPtr,   (ULONG)&errno,
                    AmiSSL_SocketBase, (ULONG)SocketBase,
                    TAG_DONE) != 0) {
-        HERR("amicloud: InitAmiSSL failed\n");
+        HERR("amicloudcore: InitAmiSSL failed\n");
         CloseAmiSSL();                  AmiSSLBase       = NULL;
         CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase = NULL;
         CloseLibrary(SocketBase);       SocketBase       = NULL;
@@ -1105,7 +1105,7 @@ int http_init(void)
     HLOG("http_init: SSL_CTX_new\n");
     g_ssl_ctx = SSL_CTX_new(TLS_client_method());
     if (!g_ssl_ctx) {
-        HERR("amicloud: SSL_CTX_new failed\n");
+        HERR("amicloudcore: SSL_CTX_new failed\n");
         CleanupAmiSSLA(NULL);           AmiSSLInitialized = FALSE;
         CloseAmiSSL();                  AmiSSLBase        = NULL;
         CloseLibrary(AmiSSLMasterBase); AmiSSLMasterBase  = NULL;

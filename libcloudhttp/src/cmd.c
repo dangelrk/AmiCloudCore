@@ -116,12 +116,12 @@ static int check_status(const JSON_Object *root, const char *url)
 {
     const char *st = json_object_get_string(root, "status");
     if (!st) {
-        ui_notify(UI_ERROR, "amicloud: no status in response from %s", url);
+        ui_notify(UI_ERROR, "amicloudcore: no status in response from %s", url);
         return 0;
     }
     if (strcmp(st, "ok") != 0) {
         const char *msg = json_object_get_string(root, "message");
-        ui_notify(UI_ERROR, "amicloud: server error: %s", msg ? msg : "");
+        ui_notify(UI_ERROR, "amicloudcore: server error: %s", msg ? msg : "");
         return 0;
     }
     return 1;
@@ -150,17 +150,17 @@ static JSON_Value *fetch_list_json(const AcConfig *cfg, const char *remote_path,
     resp = http_request("GET", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return NULL;
     }
     if (!resp->body) {
-        ui_notify(UI_ERROR, "amicloud: empty response (HTTP %d)", resp->status_code);
+        ui_notify(UI_ERROR, "amicloudcore: empty response (HTTP %d)", resp->status_code);
         http_response_free(resp); return NULL;
     }
 
     root_val = json_parse_string(resp->body);
     http_response_free(resp);
-    if (!root_val) { ui_notify(UI_ERROR, "amicloud: invalid JSON"); return NULL; }
+    if (!root_val) { ui_notify(UI_ERROR, "amicloudcore: invalid JSON"); return NULL; }
     root = json_value_get_object(root_val);
     if (!root || !check_status(root, url)) { json_value_free(root_val); return NULL; }
     return root_val;
@@ -181,7 +181,7 @@ int cmd_list_mode(const AcConfig *cfg, const char *remote_path, ListMode mode)
 
     entries = json_object_get_array(root, "entries");
     if (!entries) {
-        ui_notify(UI_ERROR, "amicloud: missing entries");
+        ui_notify(UI_ERROR, "amicloudcore: missing entries");
         json_value_free(root_val); return 1;
     }
 
@@ -390,12 +390,12 @@ int cmd_changes(const AcConfig *cfg, long since, AcChange **out, int *out_n, lon
     resp = http_request("GET", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0 || !resp->body) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 0;
     }
     root_val = json_parse_string(resp->body);
     http_response_free(resp);
-    if (!root_val) { ui_notify(UI_ERROR, "amicloud: invalid JSON"); return 0; }
+    if (!root_val) { ui_notify(UI_ERROR, "amicloudcore: invalid JSON"); return 0; }
     root = json_value_get_object(root_val);
     if (!root || !check_status(root, url)) { json_value_free(root_val); return 0; }
 
@@ -461,12 +461,12 @@ int cmd_search(const AcConfig *cfg, const char *root, const char *pattern,
     resp = http_request("GET", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0 || !resp->body) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 0;
     }
     root_val = json_parse_string(resp->body);
     http_response_free(resp);
-    if (!root_val) { ui_notify(UI_ERROR, "amicloud: invalid JSON"); return 0; }
+    if (!root_val) { ui_notify(UI_ERROR, "amicloudcore: invalid JSON"); return 0; }
     robj = json_value_get_object(root_val);
     if (!robj || !check_status(robj, url)) { json_value_free(root_val); return 0; }
 
@@ -521,7 +521,7 @@ int cmd_get_md5(const AcConfig *cfg, const char *remote_path, char *hex_out, siz
     resp = http_request("GET", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0 || !resp->body) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 1;
     }
     root_val = json_parse_string(resp->body);
@@ -530,14 +530,14 @@ int cmd_get_md5(const AcConfig *cfg, const char *remote_path, char *hex_out, siz
     if (!root || !check_status(root, url)) { if (root_val) json_value_free(root_val); return 1; }
 
     if (strcmp(jstr(root, "type"), "dir") == 0) {
-        ui_notify(UI_ERROR, "amicloud: md5: '%s' is a directory", remote_path);
+        ui_notify(UI_ERROR, "amicloudcore: md5: '%s' is a directory", remote_path);
         json_value_free(root_val);
         return 1;
     }
 
     sum = jstr(root, "md5");
     if (!sum[0]) {
-        ui_notify(UI_ERROR, "amicloud: md5: no checksum available for '%s'", remote_path);
+        ui_notify(UI_ERROR, "amicloudcore: md5: no checksum available for '%s'", remote_path);
         json_value_free(root_val);
         return 1;
     }
@@ -583,7 +583,7 @@ int cmd_get(const AcConfig *cfg, const char *remote_path, const char *local_path
     }
 
     fp = fopen(local, "wb");
-    if (!fp) { ui_notify(UI_ERROR, "amicloud: get: cannot open local file '%s' for writing", local); return 1; }
+    if (!fp) { ui_notify(UI_ERROR, "amicloudcore: get: cannot open local file '%s' for writing", local); return 1; }
 
     /* MD5 is verified while streaming, not re-read afterwards (plan
      * section 18.3) — cheap even on 68k, the bytes pass through the CPU
@@ -599,11 +599,11 @@ int cmd_get(const AcConfig *cfg, const char *remote_path, const char *local_path
             http_response_free(resp);
             return 1;
         }
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 1;
     }
     if (resp->status_code != 200) {
-        ui_notify(UI_ERROR, "amicloud: server returned HTTP %d", resp->status_code);
+        ui_notify(UI_ERROR, "amicloudcore: server returned HTTP %d", resp->status_code);
         http_response_free(resp); return 1;
     }
 
@@ -613,7 +613,7 @@ int cmd_get(const AcConfig *cfg, const char *remote_path, const char *local_path
     md5_to_hex(digest, local_hex);
     if (resp->md5_header[0] && strcmp(resp->md5_header, local_hex) != 0) {
         ui_notify(UI_ERROR,
-                  "amicloud: get: MD5 mismatch for %s (server %s, got %s) -- deleting incomplete file",
+                  "amicloudcore: get: MD5 mismatch for %s (server %s, got %s) -- deleting incomplete file",
                   local, resp->md5_header, local_hex);
         remove(local);
         http_response_free(resp);
@@ -647,16 +647,16 @@ int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path
      * an 8 MB Amiga, malloc'ing an entire upload was a hard ceiling on
      * file size. The extra disk read is cheap next to the network transfer. */
     if (!md5_file_hex(local_path, md5hex)) {
-        ui_notify(UI_ERROR, "amicloud: put: cannot open local file '%s' for reading", local_path);
+        ui_notify(UI_ERROR, "amicloudcore: put: cannot open local file '%s' for reading", local_path);
         return 1;
     }
 
     fp = fopen(local_path, "rb");
-    if (!fp) { ui_notify(UI_ERROR, "amicloud: put: cannot open local file '%s' for reading", local_path); return 1; }
+    if (!fp) { ui_notify(UI_ERROR, "amicloudcore: put: cannot open local file '%s' for reading", local_path); return 1; }
     fseek(fp, 0, SEEK_END);
     fsize = ftell(fp);
     fseek(fp, 0, SEEK_SET);
-    if (fsize < 0) { fclose(fp); ui_notify(UI_ERROR, "amicloud: cannot determine file size"); return 1; }
+    if (fsize < 0) { fclose(fp); ui_notify(UI_ERROR, "amicloudcore: cannot determine file size"); return 1; }
 
     make_auth(auth, sizeof(auth), cfg);
     if (remote_path && *remote_path) {
@@ -680,7 +680,7 @@ int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path
 
     if (!resp || resp->status_code == 0) {
         if (resp && resp->aborted) { http_response_free(resp); return 1; }
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 1;
     }
     root_val = json_parse_string(resp->body ? resp->body : "{}");
@@ -710,7 +710,7 @@ int cmd_del(const AcConfig *cfg, const char *remote_path)
     resp = http_request("DELETE", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 1;
     }
     root_val = json_parse_string(resp->body ? resp->body : "{}");
@@ -741,7 +741,7 @@ int cmd_info_raw(const AcConfig *cfg, const char *remote_path, AcInfo *out)
     resp = http_request("GET", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0 || !resp->body) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 1;
     }
     root_val = json_parse_string(resp->body);
@@ -837,7 +837,7 @@ int cmd_rename(const AcConfig *cfg, const char *from_path, const char *to_path)
     resp = http_request("POST", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 1;
     }
     root_val = json_parse_string(resp->body ? resp->body : "{}");
@@ -869,7 +869,7 @@ int cmd_setcomment(const AcConfig *cfg, const char *remote_path, const char *com
     resp = http_request("POST", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 1;
     }
     root_val = json_parse_string(resp->body ? resp->body : "{}");
@@ -896,7 +896,7 @@ int cmd_setprotect(const AcConfig *cfg, const char *remote_path, long bits)
     resp = http_request("POST", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 1;
     }
     root_val = json_parse_string(resp->body ? resp->body : "{}");
@@ -925,7 +925,7 @@ int cmd_mkdir(const AcConfig *cfg, const char *remote_path)
     resp = http_request("POST", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 1;
     }
     root_val = json_parse_string(resp->body ? resp->body : "{}");
@@ -985,7 +985,7 @@ int cmd_setdate_mtime(const AcConfig *cfg, const char *remote_path, long mtime_e
     resp = http_request("POST", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 1;
     }
     root_val = json_parse_string(resp->body ? resp->body : "{}");
@@ -1046,7 +1046,7 @@ int cmd_del_recursive(const AcConfig *cfg, const char *remote_path)
     resp = http_request("DELETE", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp);
         return 1;
     }
@@ -1086,13 +1086,13 @@ int cmd_get_buf(const AcConfig *cfg, const char *remote_path, char **out, long *
     resp = http_request("GET", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp);
         return 1;
     }
     if (status_out) *status_out = resp->status_code;
     if (resp->status_code != 200) {
-        ui_notify(UI_ERROR, "amicloud: server returned HTTP %d", resp->status_code);
+        ui_notify(UI_ERROR, "amicloudcore: server returned HTTP %d", resp->status_code);
         http_response_free(resp);
         return 1;
     }
@@ -1111,7 +1111,7 @@ int cmd_get_buf(const AcConfig *cfg, const char *remote_path, char **out, long *
         ac_log_printf("get_buf: MD5 done, got '%s'\n", hex);
 #endif
         if (strcmp(resp->md5_header, hex) != 0) {
-            ui_notify(UI_ERROR, "amicloud: get_buf: MD5 mismatch for %s", remote_path);
+            ui_notify(UI_ERROR, "amicloudcore: get_buf: MD5 mismatch for %s", remote_path);
             http_response_free(resp);
             return 1;
         }
@@ -1128,7 +1128,7 @@ int cmd_get_buf(const AcConfig *cfg, const char *remote_path, char **out, long *
         buf = (char *)malloc((size_t)(len > 0 ? len : 1));
 #endif
         if (!buf) {
-            ui_notify(UI_ERROR, "amicloud: get_buf: out of memory");
+            ui_notify(UI_ERROR, "amicloudcore: get_buf: out of memory");
             http_response_free(resp);
             return 1;
         }
@@ -1173,7 +1173,7 @@ int cmd_put_buf(const AcConfig *cfg, const char *remote_path, const char *buf, l
     resp = http_request("POST", url, auth, buf, len, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
     if (!resp || resp->status_code == 0) {
-        ui_notify(UI_ERROR, "amicloud: network error");
+        ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp);
         return 1;
     }

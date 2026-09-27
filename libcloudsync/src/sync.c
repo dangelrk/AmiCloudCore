@@ -353,7 +353,7 @@ static void report_conflict(int verbose, SyncSummary *out, SyncState *new_st,
                            const char *path, const char *reason)
 {
     if (verbose)
-        ui_notify(UI_WARN, "amicloud: sync: conflict at '%s' (%s) -- skipped", path, reason);
+        ui_notify(UI_WARN, "amicloudcore: sync: conflict at '%s' (%s) -- skipped", path, reason);
     out->conflicts++;
     /* A conflicted path's baseline entry (see carry_forward()) does NOT
      * mirror its actual current remote content -- disables the delta-
@@ -794,7 +794,7 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
 
         if (!syncstate_save(local_root, &new_st)) {
             if (verbose)
-                ui_notify(UI_WARN, "amicloud: sync: could not write %s -- next sync will rescan fully",
+                ui_notify(UI_WARN, "amicloudcore: sync: could not write %s -- next sync will rescan fully",
                          SYNCSTATE_FILE);
             ac_log_printf("sync: Baseline (%s) konnte nicht geschrieben werden -- naechster Sync scannt komplett neu\n",
                           SYNCSTATE_FILE);
