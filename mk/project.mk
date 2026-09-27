@@ -34,7 +34,7 @@ export VBCC
 AMIGA_MAKEFLAGS = $(if $(VC_CONFIG),TARGET=+$(VC_CONFIG))
 
 .PHONY: all pc qt amiga build-amiga-script verify-amiga-script dist-amiga \
-        install clean help
+        check-guide fsuae install clean help
 
 all: pc
 
@@ -46,6 +46,8 @@ help:
 	@echo "  make dist-amiga           Amiga-Installationsschublade unter $(DIST_DIR)/"
 	@echo "  make build-amiga-script   Build-Amiga (natives Amiga-Buildskript) neu erzeugen"
 	@echo "  make verify-amiga-script  ... und auf dem Host mit vbcc gegenpruefen"
+	@echo "  make check-guide          AmigaGuide-Handbuch(er) in docs/user/ pruefen"
+	@echo "  make fsuae [PROGS=...]    Amiga-Programme im Emulator FS-UAE testen"
 	@echo "  make install              Host-Programme nach $(PREFIX)/bin installieren"
 	@echo "  make clean                alle Build-Ergebnisse entfernen"
 
@@ -92,6 +94,16 @@ dist-amiga: amiga
 	    echo "Archiv: $(BUILD_DIR)/$(PROJECT).lha"; \
 	else rm -f $(BUILD_DIR)/$(PROJECT).lha; \
 	    echo "Hinweis: kein packfaehiges lha gefunden -- nur die Schublade $(DIST_DIR) erzeugt."; fi
+
+# AmigaGuide syntax/encoding check (nodes, links, Latin-1, line length).
+check-guide:
+	@set -e; for g in docs/user/*.guide; do \
+	    printf '%s: ' "$$g"; python3 core/tools/check-guide.py "$$g"; done
+
+# Copy bin/amiga/ programs into the FS-UAE shared folder and start the
+# emulator -- see core/tools/run-fsuae.sh for FSUAE_CONFIG/FSUAE_SHARED.
+fsuae:
+	core/tools/run-fsuae.sh $(PROGS)
 
 install:
 	@test -d bin/pc || { echo "Erst 'make pc' (und ggf. 'make qt') ausfuehren."; exit 1; }

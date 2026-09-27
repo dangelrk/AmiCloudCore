@@ -24,9 +24,11 @@ git submodule update --init
 | `libcloudhttp/` | HTTP(S)-Transport: Amiga über bsdsocket.library + AmiSSL 5 (`http_amiga.c`), PC über libcurl (`http_pc.c`). Darauf die Protokoll-Clients: `cmd.c` (AmiCloud-REST-API) und `webdavcmd.c` (WebDAV für OwnCloud/Nextcloud) |
 | `libcloudfs/` | Lokales Dateisystem und Wildcards, je eine Amiga- (dos.library) und PC-Variante (POSIX) |
 | `libcloudsync/` | Transportneutraler Zwei-Wege-Abgleich mit persistentem Abgleichsstand (`syncstate`); Transport AmiCloud-REST oder WebDAV (`webdav.c`) |
-| `common/` | Von mehreren Programmen genutzter Anwendungscode: Dateilisten-Logik der Commander (`panel.c`), GadTools-Baukasten der Prefs-Editoren (`prefsgui.c`), lokale Dateisuche (`search.c`) |
-| `mk/project.mk` | Gemeinsame Top-Level-Buildlogik der Projekte (`make pc`, `qt`, `amiga`, `dist-amiga`, `install`, `clean`, `help`) |
+| `common/` | Von mehreren Programmen genutzter Anwendungscode: Dateilisten-Logik der Commander (`panel.c`), GadTools-Baukasten der Prefs-Editoren (`prefsgui.c`), lokale Dateisuche (`search.c`), vbcc-Aufrufstümpfe für muimaster.library (`mui_stubs.c`, nur Amiga/MUI) |
+| `mk/project.mk` | Gemeinsame Top-Level-Buildlogik der Projekte (`make pc`, `qt`, `amiga`, `dist-amiga`, `check-guide`, `fsuae`, `install`, `clean`, `help`) |
 | `tools/gen-build-amiga.py` | Erzeugt das native AmigaOS-Buildskript `Build-Amiga` eines Projekts aus dessen `Makefile.amiga-cross`-Dateien und prüft es auf Wunsch mit dem Host-vbcc (`--verify`) |
+| `tools/check-guide.py` | Prüft ein AmigaGuide-Handbuch (Nodes, Links, `@prev`/`@next`, Latin-1, Zeilenlänge) – `make check-guide` im Projekt |
+| `tools/run-fsuae.sh` | Kopiert `bin/amiga/` in den Freigabeordner des Emulators FS-UAE und startet ihn – `make fsuae` im Projekt (Einstellungen per `FSUAE_CONFIG`/`FSUAE_SHARED`) |
 
 Jede Bibliothek hat ein `Makefile.pc` (statische Bibliothek
 `libcloud*.a`) und ein `Makefile.amiga-cross` (vbcc-Objekte). Die
