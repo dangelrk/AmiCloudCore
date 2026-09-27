@@ -16,6 +16,22 @@ int cmd_list (const AcConfig *cfg, const char *remote_path);
 int cmd_list_mode(const AcConfig *cfg, const char *remote_path, ListMode mode);
 int cmd_get  (const AcConfig *cfg, const char *remote_path, const char *local_path);
 int cmd_put  (const AcConfig *cfg, const char *local_path,  const char *remote_path);
+
+/* Overwrite-checked put/get for interactive frontends (amicloud CLI,
+ * amicloud-shell): same transfer and same target naming as cmd_put()/
+ * cmd_get(), but unless force is set they first check whether the
+ * destination exists and then ask via ui_confirm() (default: no; on the
+ * console EOF also counts as no, so a non-interactive call never
+ * overwrites without force). put checks the server with one extra
+ * request and transfers nothing if it cannot tell (network/server
+ * error) or the target is a directory; get checks the local file.
+ * cmd_put()/cmd_get() themselves stay unchecked -- the Commander's copy
+ * engine (panel.c) asks via ui_overwrite() before calling them. */
+int cmd_put_checked(const AcConfig *cfg, const char *local_path,
+                    const char *remote_path, int force);
+int cmd_get_checked(const AcConfig *cfg, const char *remote_path,
+                    const char *local_path, int force);
+
 int cmd_del  (const AcConfig *cfg, const char *remote_path);
 int cmd_info (const AcConfig *cfg, const char *remote_path);
 

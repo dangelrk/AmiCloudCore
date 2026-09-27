@@ -555,6 +555,19 @@ void cmd_resolve_path(const AcConfig *cfg, const char *path, char *out, size_t o
     full_path(out, outsz, cfg, path);
 }
 
+/* Local target of a get: local_path, or -- if none was given -- the
+ * remote file's name (rpath already resolved) in the current directory. */
+static const char *get_target(const char *local_path, const char *rpath,
+                              char *local_buf, size_t lsz)
+{
+    const char *slash;
+    if (local_path && *local_path) return local_path;
+    slash = strrchr(rpath, '/');
+    strncpy(local_buf, slash ? slash + 1 : rpath, lsz - 1);
+    local_buf[lsz - 1] = '\0';
+    return local_buf;
+}
+
 /* ------------------------------------------------------------------ */
 /* get (download)                                                        */
 /* ------------------------------------------------------------------ */
@@ -573,14 +586,7 @@ int cmd_get(const AcConfig *cfg, const char *remote_path, const char *local_path
     full_path(rpath, sizeof(rpath), cfg, remote_path);
     build_url(url, sizeof(url), cfg, "download", rpath);
 
-    if (local_path && *local_path) {
-        local = local_path;
-    } else {
-        const char *slash = strrchr(rpath, '/');
-        strncpy(local_buf, slash ? slash + 1 : rpath, sizeof(local_buf) - 1);
-        local_buf[sizeof(local_buf) - 1] = '\0';
-        local = local_buf;
-    }
+    local = get_target(local_path, rpath, local_buf, sizeof(local_buf));
 
     fp = fopen(local, "wb");
     if (!fp) { ui_notify(UI_ERROR, "amicloudcore: get: cannot open local file '%s' for writing", local); return 1; }
@@ -625,23 +631,14 @@ int cmd_get(const AcConfig *cfg, const char *remote_path, const char *local_path
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* put (upload)                                                          */
-/* ------------------------------------------------------------------ */
-int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path)
+/* Remote target of a put: remote_path resolved against the base path,
+ * or -- if none was given -- the local file's name in the base path.
+ * Returns 0 (after ui_notify) if no name can be derived. */
+static int put_target(const AcConfig *cfg, const char *local_path,
+                      const char *remote_path, char *rpath, size_t rsz)
 {
-    char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH];
-    long fsize;
-    FILE *fp;
-    HttpResponse *resp;
-    JSON_Value *root_val;
-    JSON_Object *root;
-    int ok;
-    char md5hex[33];
-
-    make_auth(auth, sizeof(auth), cfg);
     if (remote_path && *remote_path) {
-        full_path(rpath, sizeof(rpath), cfg, remote_path);
+        full_path(rpath, rsz, cfg, remote_path);
     } else {
         /* Remote name = last path component. Besides '/', an AmigaDOS
          * volume/device prefix ends at ':' ("DH0:file" -> "file"); the
@@ -658,11 +655,30 @@ int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path
         if (!*name) {
             ui_notify(UI_ERROR, "amicloudcore: put: '%s' names no file -- "
                       "please give the remote path explicitly (put <local> <remote>)", local_path);
-            return 1;
+            return 0;
         }
-        snprintf(rpath, sizeof(rpath), "%s/%s",
+        snprintf(rpath, rsz, "%s/%s",
                  strcmp(cfg->basepath, "/") == 0 ? "" : cfg->basepath, name);
     }
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* put (upload)                                                          */
+/* ------------------------------------------------------------------ */
+int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path)
+{
+    char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH];
+    long fsize;
+    FILE *fp;
+    HttpResponse *resp;
+    JSON_Value *root_val;
+    JSON_Object *root;
+    int ok;
+    char md5hex[33];
+
+    make_auth(auth, sizeof(auth), cfg);
+    if (!put_target(cfg, local_path, remote_path, rpath, sizeof(rpath))) return 1;
 
     /* &md5= lets the server reject a corrupted upload with 422 before it
      * ever hits disk (plan section 18.2/18.3); an older server just
@@ -702,6 +718,86 @@ int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path
     if (root_val) json_value_free(root_val);
     if (ok) ui_notify(UI_INFO, "Uploaded %s -> %s", local_path, rpath);
     return ok ? 0 : 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* Overwrite-checked put/get (amicloud CLI, amicloud-shell)            */
+/* ------------------------------------------------------------------ */
+
+/* What is at an already resolved remote path: 1 = file, 2 = directory,
+ * 0 = nothing (HTTP 404), -1 = could not tell (network/server error).
+ * The caller must treat -1 as "do not touch it". */
+static int remote_state(const AcConfig *cfg, const char *rpath)
+{
+    char auth[192], url[AC_MAX_URL];
+    HttpResponse *resp;
+    JSON_Value *root_val;
+    JSON_Object *root;
+    const char *st, *type;
+    int state = -1;
+
+    make_auth(auth, sizeof(auth), cfg);
+    build_url(url, sizeof(url), cfg, "info", rpath);
+    resp = http_request("GET", url, auth, NULL, 0, cfg->verify_ssl);
+    g_last_status = resp ? resp->status_code : 0;
+    if (!resp || resp->status_code == 0) { http_response_free(resp); return -1; }
+    if (resp->status_code == 404)        { http_response_free(resp); return 0; }
+    root_val = resp->body ? json_parse_string(resp->body) : NULL;
+    http_response_free(resp);
+    if (!root_val) return -1;
+    root = json_value_get_object(root_val);
+    st   = json_object_get_string(root, "status");
+    type = json_object_get_string(root, "type");
+    if (st && strcmp(st, "ok") == 0)
+        state = (type && strcmp(type, "dir") == 0) ? 2 : 1;
+    json_value_free(root_val);
+    return state;
+}
+
+int cmd_put_checked(const AcConfig *cfg, const char *local_path,
+                    const char *remote_path, int force)
+{
+    char rpath[AC_MAX_PATH];
+    int state;
+
+    if (!put_target(cfg, local_path, remote_path, rpath, sizeof(rpath))) return 1;
+    if (!force) {
+        state = remote_state(cfg, rpath);
+        if (state < 0) {
+            ui_notify(UI_ERROR, "amicloudcore: put: cannot check whether '%s' already "
+                      "exists on the server -- nothing transferred", rpath);
+            return 1;
+        }
+        if (state == 2) {
+            ui_notify(UI_ERROR, "amicloudcore: put: '%s' is a directory on the server -- "
+                      "give the target path including the file name", rpath);
+            return 1;
+        }
+        if (state == 1 && !ui_confirm("'%s' already exists on the server. Overwrite?", rpath)) {
+            ui_notify(UI_WARN, "amicloudcore: put: '%s' not overwritten", rpath);
+            return 1;
+        }
+    }
+    return cmd_put(cfg, local_path, rpath);
+}
+
+int cmd_get_checked(const AcConfig *cfg, const char *remote_path,
+                    const char *local_path, int force)
+{
+    char rpath[AC_MAX_PATH], local_buf[AC_MAX_PATH];
+    const char *local;
+    FILE *fp;
+
+    full_path(rpath, sizeof(rpath), cfg, remote_path);
+    local = get_target(local_path, rpath, local_buf, sizeof(local_buf));
+    if (!force && (fp = fopen(local, "rb")) != NULL) {
+        fclose(fp);
+        if (!ui_confirm("Local file '%s' already exists. Overwrite?", local)) {
+            ui_notify(UI_WARN, "amicloudcore: get: '%s' not overwritten", local);
+            return 1;
+        }
+    }
+    return cmd_get(cfg, rpath, local);
 }
 
 /* ------------------------------------------------------------------ */

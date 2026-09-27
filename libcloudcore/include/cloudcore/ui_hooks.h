@@ -56,6 +56,17 @@ typedef struct {
  * rather than becoming a no-op, so a caller may override just one hook. */
 void ui_set_hooks(const UiHooks *h);
 
+/* Line input used by the console defaults of confirm() and overwrite().
+ * The built-in reader prints the prompt and reads a line from stdin with
+ * fgets(). A program whose terminal is in raw mode (amicloud-shell's line
+ * editor) or that reads its commands from stdin installs its own reader,
+ * so the answer is echoed properly and no command line is swallowed as
+ * an answer. The reader returns the answer's length, or -1 if no answer
+ * can be read -- the prompts then take the safe choice (confirm: no,
+ * overwrite: cancel). NULL restores the built-in reader. */
+typedef int (*UiReadLine)(const char *prompt, char *buf, size_t bufsz);
+void ui_set_line_reader(UiReadLine fn);
+
 /* printf-style helpers used throughout cmd.c/shell.c instead of calling
  * printf()/fprintf(stderr)/a local confirm() directly. */
 void ui_notify(int level, const char *fmt, ...);

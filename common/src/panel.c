@@ -267,6 +267,10 @@ void panel_copy_file(PanelSource ssrc, const AcConfig *scfg, const char *spath,
              * is called, so a Cancel click that lands between two skips is
              * caught here too, not just between top-level entries. */
             progress_prefix(&c->pr, smeta->size);
+            /* Completes the console's "(x/y pct%) " prefix line like the
+             * "Uploaded/Downloaded ..." message of a real transfer; the
+             * GUIs show it in their status line/log. */
+            ui_notify(UI_INFO, "Skipped %s", name);
             if (!ui_progress(0, smeta->size, name)) c->cancelled = 1;
             return;
         }

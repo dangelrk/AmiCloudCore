@@ -59,13 +59,31 @@ static void console_notify(int level, const char *msg)
     else printf("%s\n", msg);
 }
 
+/* Default line reader for the console prompts below: prompt + fgets(). */
+static int stdio_read_line(const char *prompt, char *buf, size_t bufsz)
+{
+    size_t n;
+    fputs(prompt, stdout);
+    fflush(stdout);
+    if (!fgets(buf, (int)bufsz, stdin)) return -1;
+    n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = '\0';
+    return (int)n;
+}
+
+static UiReadLine g_read_line = stdio_read_line;
+
+void ui_set_line_reader(UiReadLine fn)
+{
+    g_read_line = fn ? fn : stdio_read_line;
+}
+
 static int console_confirm(const char *msg)
 {
-    char line[16];
+    char prompt[1100], line[16];
     console_progress_close_line();
-    printf("%s [y/N] ", msg);
-    fflush(stdout);
-    if (!fgets(line, sizeof(line), stdin)) return 0;
+    snprintf(prompt, sizeof(prompt), "%s [y/N] ", msg);
+    if (g_read_line(prompt, line, sizeof(line)) < 0) return 0;
     return (line[0] == 'y' || line[0] == 'Y');
 }
 
@@ -99,19 +117,38 @@ static int console_progress(long done, long total, const char *name)
     return 1;
 }
 
-/* Console/shell recursive get/put has always overwritten silently (no
- * existence check at all) — the default keeps that behaviour exactly, so
- * shell.c's CopyCtx is built with ask=0 and this hook is never even
- * consulted there; it only matters if some future caller sets ask=1
- * without installing its own overwrite hook. */
+/* Console overwrite prompt (amicloud-shell's get -r/put -r and wildcard
+ * copies without -f; the GUIs install their own hook). The default is
+ * the safe choice: an empty answer skips the file, no answer at all
+ * (EOF / line reader returns -1) cancels the whole operation. */
 static UiOverwrite console_overwrite(int is_dir, const char *name,
                                      long src_size, const char *src_date, const char *src_md5,
                                      long dst_size, const char *dst_date, const char *dst_md5)
 {
-    (void)is_dir; (void)name;
-    (void)src_size; (void)src_date; (void)src_md5;
-    (void)dst_size; (void)dst_date; (void)dst_md5;
-    return UI_OW_OVERWRITE;
+    char line[16];
+
+    console_progress_close_line();
+    if (is_dir) {
+        printf("Directory '%s' already exists.\n", name);
+    } else {
+        printf("'%s' already exists.\n", name);
+        printf("  existing: %10ld bytes  %s\n", dst_size, (dst_date && *dst_date) ? dst_date : "-");
+        printf("  new:      %10ld bytes  %s\n", src_size, (src_date && *src_date) ? src_date : "-");
+        if (src_md5 && dst_md5 && *src_md5 && strcmp(src_md5, dst_md5) == 0)
+            printf("  (identical content, MD5 %s)\n", src_md5);
+    }
+    if (g_read_line(is_dir
+                    ? "Copy into it? [y]es [n]o [a]ll [s]kip all [c]ancel (default: n) "
+                    : "Overwrite? [y]es [n]o [a]ll [s]kip all [c]ancel (default: n) ",
+                    line, sizeof(line)) < 0)
+        return UI_OW_CANCEL;
+    switch (line[0]) {
+    case 'y': case 'Y': return UI_OW_OVERWRITE;
+    case 'a': case 'A': return UI_OW_OVERWRITE_ALL;
+    case 's': case 'S': return UI_OW_SKIP_ALL;
+    case 'c': case 'C': case 'q': case 'Q': return UI_OW_CANCEL;
+    default:            return UI_OW_SKIP;
+    }
 }
 
 static UiHooks g_hooks = { console_notify, console_confirm, console_progress, console_overwrite };

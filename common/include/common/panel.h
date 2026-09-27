@@ -68,8 +68,8 @@ typedef struct {
 typedef struct {
     Progress pr;
     int ask;       /* 1 = check destination existence and ask via ui_overwrite();
-                    * 0 = silently overwrite, no existence check at all (shell
-                    * get -r/put -r — unchanged pre-existing behaviour). */
+                    * 0 = silently overwrite, no existence check at all (the
+                    * shell's get -r/put -r with -f/FORCE). */
     int policy;    /* -1 = ask again on the next conflict; otherwise a sticky
                     * UiOverwrite (UI_OW_OVERWRITE_ALL or UI_OW_SKIP_ALL) from
                     * ui_hooks.h, applied without asking. Plain int here so
