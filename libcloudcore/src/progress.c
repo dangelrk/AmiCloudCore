@@ -34,3 +34,23 @@ void progress_prefix(Progress *p, long file_size)
     }
     fflush(stdout);
 }
+
+void ac_format_kb(long kb, char *buf, size_t n)
+{
+    /* One decimal place via integer maths only (no float formatting in
+     * vbcc's printf needed): tenths = value * 10 / 1024, rounded. */
+    const char *unit;
+    long whole, tenths;
+    if (kb < 0) kb = 0;
+    if (kb >= 1024L * 1024L) {
+        long t = (kb / 1024L * 10L + 512L) / 1024L;   /* GB in tenths */
+        whole = t / 10; tenths = t % 10; unit = "GB";
+    } else if (kb >= 1024L) {
+        long t = (kb * 10L + 512L) / 1024L;           /* MB in tenths */
+        whole = t / 10; tenths = t % 10; unit = "MB";
+    } else {
+        snprintf(buf, n, "%ld KB", kb);
+        return;
+    }
+    snprintf(buf, n, "%ld,%ld %s", whole, tenths, unit);
+}

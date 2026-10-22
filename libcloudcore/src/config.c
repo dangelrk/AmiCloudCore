@@ -170,6 +170,7 @@ void config_usage(const char *prog)
         "  mkdir   <remote>             Create directory\n"
         "  rename  <old> <new>          Rename/move file or directory\n"
         "  search  <pattern> [path]     Find files/dirs by name (*, ?, #?), alias: find\n"
+        "  quota                        Show account and storage usage, alias: df\n"
         "  version                      Print version and exit\n",
         prog);
     exit(1);

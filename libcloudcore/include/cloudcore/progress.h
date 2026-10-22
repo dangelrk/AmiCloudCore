@@ -36,4 +36,12 @@ void progress_prefix(Progress *p, long file_size);
  * and must never punch console output through a windowed app. */
 extern int ac_console_progress;
 
+/* Human-readable size from a KiB count ("512 KB", "1,2 MB", "5,0 GB"),
+ * decimal comma like the AmiCloud web UI. Takes KiB rather than bytes
+ * because long is 32 bit on the Amiga (quota totals above 2 GB would
+ * overflow as bytes). Used for quota display in CLI, shell and both
+ * commanders. */
+#include <stddef.h>
+void ac_format_kb(long kb, char *buf, size_t n);
+
 #endif /* CLOUDCORE_PROGRESS_H */

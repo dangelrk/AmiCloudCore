@@ -81,4 +81,22 @@ typedef struct {
     long mtime;
 } AcSearchHit;
 
+/* Result of cmd_status_ex() (action=status). The user/quota fields come
+ * from AmiCloud servers with user management (AmiCloud docs/design/
+ * user-management-plan.md); on older servers has_quota stays 0 and the
+ * strings stay empty. Quota values are KiB, not bytes: long is 32 bit on
+ * the Amiga, byte counts above 2 GB would overflow. For an unlimited
+ * quota the server reports total = used + free disk space (like
+ * ownCloud), so total/used are always meaningful when has_quota is set. */
+typedef struct {
+    char version[32];
+    long global_revision;
+    int  has_quota;        /* 0 = server sent no quota (older deployment) */
+    int  quota_unlimited;  /* 1 = no per-user limit, total = used + disk free */
+    long quota_used_kb;
+    long quota_total_kb;
+    char user[64];         /* account name as stored on the server */
+    char display_name[128];
+} AcStatus;
+
 #endif /* CLOUDCORE_ENTRY_H */

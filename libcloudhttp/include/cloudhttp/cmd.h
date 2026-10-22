@@ -75,6 +75,16 @@ void cmd_entries_free(AcEntry *entries);
 int cmd_is_dir(const AcConfig *cfg, const char *remote_path);
 int cmd_status(const AcConfig *cfg, char *version_out, size_t version_sz, long *global_revision_out);
 
+/* Full action=status result incl. account name and quota (AcStatus,
+ * cloudcore/entry.h). Silent like cmd_status(); returns 1 if the server
+ * answered "ok", 0 otherwise (out is zeroed either way first). cmd_status()
+ * is a thin wrapper around this. */
+int cmd_status_ex(const AcConfig *cfg, AcStatus *out);
+
+/* Prints account and storage usage (amicloud quota, shell "quota"), like
+ * cmd_info() prints file info. Returns 0 on success. */
+int cmd_quota(const AcConfig *cfg);
+
 /* Delta source for a metadata-based sync (AmiOwnCloud docs/design/
  * 07_Sync_Metadaten.md): every row for this user with change_seq >
  * since, tombstones (AcChange.deleted) included -- unlike cmd_list_raw(),

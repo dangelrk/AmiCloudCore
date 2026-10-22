@@ -4,6 +4,7 @@
 #include "cmd.h"
 #include "http.h"
 #include "md5.h"
+#include "progress.h"  /* ac_format_kb() */
 #include "ui_hooks.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -327,20 +328,28 @@ int cmd_is_dir(const AcConfig *cfg, const char *remote_path)
     return result;
 }
 
-/* Silent connectivity/version check against action=status — used for the
- * shell's start banner. version_out receives the server version string
- * (empty on failure). Returns 1 if the server answered "ok". */
-int cmd_status(const AcConfig *cfg, char *version_out, size_t version_sz, long *global_revision_out)
+/* Bytes (JSON number, may exceed 32 bit) -> KiB, rounded up, clamped */
+static long kb_from_json(const JSON_Object *obj, const char *key)
+{
+    double b = json_object_get_number(obj, key);
+    double kb;
+    if (b <= 0.0) return 0;
+    kb = (b + 1023.0) / 1024.0;
+    if (kb >= 2147483647.0) return 2147483647L;
+    return (long)kb;
+}
+
+/* Full action=status (version, change counter, account, quota). */
+int cmd_status_ex(const AcConfig *cfg, AcStatus *out)
 {
     char auth[192], url[AC_MAX_URL];
     HttpResponse *resp;
     JSON_Value *root_val;
-    JSON_Object *root;
-    const char *status, *version;
+    JSON_Object *root, *user, *quota;
+    const char *status, *str;
     int ok = 0;
 
-    if (version_out && version_sz) version_out[0] = '\0';
-    if (global_revision_out) *global_revision_out = 0;
+    memset(out, 0, sizeof(*out));
 
     make_auth(auth, sizeof(auth), cfg);
     snprintf(url, sizeof(url), "%s/api.php?action=status", cfg->server);
@@ -353,16 +362,84 @@ int cmd_status(const AcConfig *cfg, char *version_out, size_t version_sz, long *
     if (!root_val) return 0;
     root = json_value_get_object(root_val);
 
-    status  = json_object_get_string(root, "status");
-    version = json_object_get_string(root, "version");
+    status = json_object_get_string(root, "status");
     if (status && strcmp(status, "ok") == 0) {
         ok = 1;
-        if (version && version_out)
-            strncpy(version_out, version, version_sz - 1);
-        if (global_revision_out)
-            *global_revision_out = jlong(root, "global_revision");
+        str = json_object_get_string(root, "version");
+        if (str) strncpy(out->version, str, sizeof(out->version) - 1);
+        out->global_revision = jlong(root, "global_revision");
+
+        user = json_object_get_object(root, "user");
+        if (user) {
+            str = json_object_get_string(user, "name");
+            if (str) strncpy(out->user, str, sizeof(out->user) - 1);
+            str = json_object_get_string(user, "display_name");
+            if (str) strncpy(out->display_name, str, sizeof(out->display_name) - 1);
+        }
+        quota = json_object_get_object(root, "quota");
+        if (quota) {
+            out->has_quota       = 1;
+            out->quota_unlimited = json_object_get_boolean(quota, "unlimited") == 1;
+            out->quota_used_kb   = kb_from_json(quota, "used");
+            out->quota_total_kb  = kb_from_json(quota, "total");
+        }
     }
     json_value_free(root_val);
+    return ok;
+}
+
+int cmd_quota(const AcConfig *cfg)
+{
+    AcStatus st;
+    char used[24], total[24];
+
+    if (!cmd_status_ex(cfg, &st)) {
+        if (g_last_status == 401)
+            fprintf(stderr, "Anmeldung fehlgeschlagen (Benutzer/Passwort pruefen)\n");
+        else if (g_last_status == 429)
+            fprintf(stderr, "Zu viele Fehlversuche - bitte in 15 Minuten erneut versuchen\n");
+        else
+            fprintf(stderr, "Server nicht erreichbar (HTTP %d)\n", g_last_status);
+        return 1;
+    }
+    if (st.display_name[0] && strcmp(st.display_name, st.user) != 0)
+        printf("Konto    : %s (%s)\n", st.display_name, st.user);
+    else
+        printf("Konto    : %s\n", st.user[0] ? st.user : cfg->username);
+    if (!st.has_quota) {
+        printf("Speicher : vom Server nicht gemeldet (Server v%s)\n", st.version);
+        return 0;
+    }
+    ac_format_kb(st.quota_used_kb, used, sizeof(used));
+    ac_format_kb(st.quota_total_kb, total, sizeof(total));
+    if (st.quota_unlimited) {
+        char free_s[24];
+        ac_format_kb(st.quota_total_kb - st.quota_used_kb, free_s, sizeof(free_s));
+        printf("Speicher : %s belegt, Kontingent unbegrenzt (%s frei auf dem Server)\n", used, free_s);
+    } else {
+        /* Prozent ohne 32-bit-Ueberlauf bei grossen Kontingenten */
+        long pct = st.quota_total_kb >= 100 ? st.quota_used_kb / (st.quota_total_kb / 100) : 0;
+        printf("Speicher : %s von %s belegt (%ld %%)\n", used, total, pct);
+    }
+    return 0;
+}
+
+/* Silent connectivity/version check against action=status — used for the
+ * shell's start banner. version_out receives the server version string
+ * (empty on failure). Returns 1 if the server answered "ok". */
+int cmd_status(const AcConfig *cfg, char *version_out, size_t version_sz, long *global_revision_out)
+{
+    AcStatus st;
+    int ok = cmd_status_ex(cfg, &st);
+
+    if (version_out && version_sz) {
+        version_out[0] = '\0';
+        if (ok) {
+            strncpy(version_out, st.version, version_sz - 1);
+            version_out[version_sz - 1] = '\0';
+        }
+    }
+    if (global_revision_out) *global_revision_out = ok ? st.global_revision : 0;
     return ok;
 }
 
