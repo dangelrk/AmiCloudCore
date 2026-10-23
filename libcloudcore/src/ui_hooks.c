@@ -5,10 +5,32 @@
  * ui_hooks.c — default (console) implementation + dispatch, see ui_hooks.h.
  */
 #include "ui_hooks.h"
+#include "amicloud.h" /* PLATFORM_AMIGA */
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
 #include <time.h>
+#ifdef PLATFORM_AMIGA
+#include <exec/types.h>
+#include <dos/dos.h>
+#include <proto/exec.h>
+#endif
+
+int ui_break_pending(void)
+{
+#ifdef PLATFORM_AMIGA
+    return (SetSignal(0, 0) & SIGBREAKF_CTRL_C) != 0;
+#else
+    return 0;
+#endif
+}
+
+void ui_break_clear(void)
+{
+#ifdef PLATFORM_AMIGA
+    SetSignal(0, SIGBREAKF_CTRL_C);
+#endif
+}
 
 void ui_rate_reset(UiRateMeter *m)
 {
@@ -34,6 +56,12 @@ int ui_rate_sample(UiRateMeter *m, long done)
     m->last_bytes = done;
     m->last_time  = now;
     return 1;
+}
+
+void ui_format_rate(char *out, size_t outsz, long bps)
+{
+    if (bps < 0) bps = 0;
+    snprintf(out, outsz, "%ld.%ld KB/s", bps / 1024, (bps % 1024) * 10 / 1024);
 }
 
 /* Console progress line: a live \r-updated status line, throttled via
@@ -90,8 +118,9 @@ static int console_confirm(const char *msg)
 static int console_progress(long done, long total, const char *name)
 {
     int redraw;
-    long kbps;
+    char rate[24];
 
+    if (ui_break_pending()) return 0; /* Ctrl-C: cancel this transfer */
     if (!name) name = "";
     if (strcmp(name, g_console_last_name) != 0 || done < g_console_rate.last_bytes) {
         ui_rate_reset(&g_console_rate);
@@ -105,12 +134,13 @@ static int console_progress(long done, long total, const char *name)
     redraw = ui_rate_sample(&g_console_rate, done) || (total > 0 && done >= total);
     if (!redraw) return 1;
 
-    kbps = g_console_rate.bps / 1024;
+    ui_format_rate(rate, sizeof(rate), g_console_rate.bps);
     if (total > 0) {
-        long pct = (done * 100) / total;
-        printf("\r%-24.24s %6ld%% %6ld KB/s   ", name, pct, kbps);
+        /* done*100 overflows a 32-bit long beyond ~21 MB */
+        long pct = total > 2000000L ? done / (total / 100) : (done * 100) / total;
+        printf("\r%-24.24s %6ld%% %12s   ", name, pct, rate);
     } else {
-        printf("\r%-24.24s %6ldK gelesen %6ld KB/s   ", name, done / 1024, kbps);
+        printf("\r%-24.24s %6ldK gelesen %12s   ", name, done / 1024, rate);
     }
     fflush(stdout);
     g_console_line_open = 1;

@@ -47,6 +47,27 @@ void localfs_join(char *out, size_t sz, const char *dir, const char *name)
     }
 }
 
+void localfs_sibling(char *out, size_t sz, const char *path, const char *name)
+{
+    const char *cut = NULL, *p;
+
+    for (p = path; *p; p++) {
+        if (*p == '/' || *p == ':'
+#ifdef PLATFORM_WIN
+            || *p == '\\'
+#endif
+           ) cut = p;
+    }
+    if (!cut) { snprintf(out, sz, "%s", name); return; }
+    snprintf(out, sz, "%.*s%s", (int)(cut - path + 1), path, name);
+}
+
+int localfs_replace(const char *src, const char *dst)
+{
+    remove(dst);
+    return rename(src, dst) == 0;
+}
+
 int localfs_mkdir_p(const char *path)
 {
     char   buf[AC_MAX_PATH];

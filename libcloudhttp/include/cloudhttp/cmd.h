@@ -15,6 +15,11 @@ int cmd_list (const AcConfig *cfg, const char *remote_path);
 /* cmd_list() ist ein Wrapper um cmd_list_mode(cfg, path, LIST_FULL). */
 int cmd_list_mode(const AcConfig *cfg, const char *remote_path, ListMode mode);
 int cmd_get  (const AcConfig *cfg, const char *remote_path, const char *local_path);
+/* cmd_get() writing to local_path but naming display_name in progress
+ * and messages -- for callers that download into a temporary file
+ * (libcloudsync) and rename it into place afterwards. */
+int cmd_get_named(const AcConfig *cfg, const char *remote_path, const char *local_path,
+                  const char *display_name);
 int cmd_put  (const AcConfig *cfg, const char *local_path,  const char *remote_path);
 
 /* Overwrite-checked put/get for interactive frontends (amicloud CLI,

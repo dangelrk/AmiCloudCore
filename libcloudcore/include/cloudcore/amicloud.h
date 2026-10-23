@@ -49,6 +49,13 @@ typedef struct {
      * UTC-Epoche). Default 0/0 = Uhr laeuft auf UTC. */
     int  gmt_offset;             /* Minuten relativ zu GMT/UTC, z.B. MEZ=60 */
     int  dst;                    /* Sommerzeit aktiv? 1 = ja (+60 Min) */
+    int  timeout;                /* Netz-Leerlauf-Timeout in Sekunden,
+                                  * 0 = Vorgabe (AC_HTTP_DEFAULT_TIMEOUT,
+                                  * http.h). Gilt fuer Stillstand, nie fuer
+                                  * eine ganze Uebertragung. */
+    int  cache_ttl;              /* Nur Amiga-Handler: Lebensdauer des
+                                  * Verzeichnis-Caches in Sekunden, 0 =
+                                  * Vorgabe des Handlers. */
 } AcConfig;
 
 #endif /* AMICLOUD_H */

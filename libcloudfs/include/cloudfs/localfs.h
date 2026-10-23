@@ -74,6 +74,15 @@ void localfs_join(char *out, size_t sz, const char *dir, const char *name);
  * exists). "Already exists" counts as success, like localfs_mkdir(). */
 int localfs_mkdir_p(const char *path);
 
+/* out = a file called name in the same directory as path ("Work:a/b" +
+ * "x" -> "Work:a/x", "DH1:b" -> "DH1:x", "b" -> "x"). */
+void localfs_sibling(char *out, size_t sz, const char *path, const char *name);
+
+/* Moves src over dst, replacing dst if it exists (AmigaDOS Rename() and
+ * the Windows CRT refuse to overwrite, so dst is deleted first). Both
+ * must be on the same volume. Returns 1 on success. */
+int localfs_replace(const char *src, const char *dst);
+
 /* ------------------------------------------------------------------ */
 /* UTC epoch mtimes for `sync` (plan section 19) — implemented per       */
 /* platform in localfs_pc.c/localfs_amiga.c, like localfs_stat/utime()   */

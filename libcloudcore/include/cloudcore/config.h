@@ -10,7 +10,9 @@
  * Load config from file.  Returns 1 on success, 0 if file not found
  * (caller should fall back to command-line args).
  * Keys recognised: server, username/user, password/pass, basepath,
- *                  verify_ssl (0|1), debug (log target path)
+ *                  verify_ssl (0|1), debug (log target path),
+ *                  gmt_offset, dst, timeout (network idle timeout, s),
+ *                  cache_ttl (handler directory cache lifetime, s)
  */
 int config_load(const char *filepath, AcConfig *cfg);
 

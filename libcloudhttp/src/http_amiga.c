@@ -30,8 +30,14 @@
  * connection is discarded afterward, never reused. A connection taken
  * from the cache that turns out to have been silently closed by the
  * server in the meantime (idle keep-alive timeout) is retried exactly
- * once against a guaranteed-fresh connection -- see do_request()'s
- * try_reuse loop.
+ * once against a guaranteed-fresh connection -- see exchange().
+ *
+ * Built for slow links (a modem at 2-5 KB/s, a 68k doing the TLS math):
+ * all timeouts are idle timeouts (http_set_timeout(), default 120 s),
+ * never limits on a whole transfer; Ctrl-C cancels any wait; a body that
+ * breaks off is an error, never a short "success", and a GET resumes
+ * where it stopped (do_request()); TLS sessions are resumed and the
+ * server's keep-alive window is honoured to save handshakes.
  */
 #ifdef PLATFORM_AMIGA
 
@@ -62,6 +68,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
 
 #include "http.h"
 #include "base64.h"
@@ -287,15 +294,155 @@ static char *make_basic_auth(const char *auth)
 }
 
 /* ------------------------------------------------------------------ */
-/* Low-level: open TCP socket + TLS, return SSL* or NULL on error      */
+/* Timeouts and socket waiting                                          */
+/*                                                                      */
+/* Every timeout here is an IDLE timeout: it only fires when nothing at */
+/* all moved for g_timeout seconds, and it restarts with every chunk    */
+/* that does move. There is deliberately no limit on a whole request -- */
+/* a 2 MB file at modem speed (2-5 KB/s) legitimately takes 10+ minutes.*/
+/* The socket stays non-blocking from connect() to close; every TLS     */
+/* call that can't proceed waits here via WaitSelect().                 */
+/*                                                                      */
+/* Ctrl-C: Roadshow's WaitSelect() returns -1 (EINTR) on the task's     */
+/* break signal and leaves the signal set (bsdsocket.doc/WaitSelect).   */
+/* That is reported as IO_ABORT, and because the signal stays set, the  */
+/* next request of a recursive get/put aborts right away as well until  */
+/* the program clears it (ui_break_clear(), e.g. the shell's prompt).   */
+/* ------------------------------------------------------------------ */
+static int g_timeout = AC_HTTP_DEFAULT_TIMEOUT;
+
+/* connect() needs one round trip only; waiting the full idle timeout
+ * for a server that's down is pointless. */
+#define CONNECT_TIMEOUT_MAX 60
+
+void http_set_timeout(int secs)
+{
+    g_timeout = secs > 0 ? secs : AC_HTTP_DEFAULT_TIMEOUT;
+}
+
+#define IO_DONE     1
+#define IO_TIMEOUT  0
+#define IO_ABORT   -1   /* Ctrl-C or the progress hook said stop */
+#define IO_EOF     -2   /* peer closed the connection */
+#define IO_ERROR   -3   /* reset, TLS error, out of memory, disk full */
+
+/* Waits until sock is readable (for_write 0) or writable (1). Returns
+ * IO_DONE, IO_TIMEOUT or IO_ABORT. */
+static int wait_sock(AC_SOCKET sock, int for_write, int secs)
+{
+    fd_set fds;
+    struct timeval tv;
+    int sel;
+
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+    tv.tv_secs  = secs;
+    tv.tv_micro = 0;
+    /* (void*) cast: Roadshow-struct timeval vs exec/types.h — gleiche Binaerlayout auf 68k */
+    sel = WaitSelect(sock + 1, for_write ? NULL : &fds, for_write ? &fds : NULL,
+                     NULL, (void *)&tv, NULL);
+    if (sel > 0) return IO_DONE;
+    if (ui_break_pending()) {
+        HLOG("io: break signal\n");
+        return IO_ABORT;
+    }
+    return IO_TIMEOUT;
+}
+
+/* After SSL_read/SSL_write/SSL_connect returned ret <= 0: waits for
+ * whatever OpenSSL needs next. IO_DONE means "call it again". */
+static int ssl_wait(SSL *ssl, AC_SOCKET sock, int ret)
+{
+    int err = SSL_get_error(ssl, ret);
+
+    switch (err) {
+    case SSL_ERROR_WANT_READ:   return wait_sock(sock, 0, g_timeout);
+    case SSL_ERROR_WANT_WRITE:  return wait_sock(sock, 1, g_timeout);
+    case SSL_ERROR_ZERO_RETURN: return IO_EOF;
+    case SSL_ERROR_SYSCALL:     if (ret == 0) return IO_EOF;
+                                return ui_break_pending() ? IO_ABORT : IO_ERROR;
+    default:
+        HLOG("io: SSL error %d\n", err);
+        return IO_ERROR;
+    }
+}
+
+/* Writes all len bytes. Without SSL_MODE_ENABLE_PARTIAL_WRITE a
+ * successful SSL_write() always takes everything; a WANT_WRITE retry
+ * must repeat the call with the same buffer and length (SSL_write(3)),
+ * which this loop does. */
+static int ssl_write_all(SSL *ssl, AC_SOCKET sock, const char *buf, int len)
+{
+    while (len > 0) {
+        int n, r;
+        ERR_clear_error();
+        n = SSL_write(ssl, buf, len);
+        if (n > 0) { buf += n; len -= n; continue; }
+        r = ssl_wait(ssl, sock, n);
+        if (r != IO_DONE) return r;
+    }
+    return IO_DONE;
+}
+
+static const char *io_text(int io)
+{
+    switch (io) {
+    case IO_TIMEOUT: return "timed out";
+    case IO_ABORT:   return "cancelled";
+    case IO_EOF:     return "connection closed by server";
+    default:         return "connection error";
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* TLS session resumption                                               */
+/*                                                                      */
+/* A full handshake (certificate chain verification, key exchange) costs*/
+/* 10-60 s of 68k CPU time; resuming a session skips the certificate    */
+/* part. One remembered session is enough -- a process only ever talks  */
+/* to the one server in its config. Keyed by the SNI host name.         */
+/* ------------------------------------------------------------------ */
+static SSL_SESSION *g_sess = NULL;
+static char         g_sess_host[256] = "";
+
+/* Called right before a connection is freed or parked: with TLS 1.3 the
+ * session ticket only arrives after the handshake, so only now is
+ * there something resumable to keep. */
+static void sess_remember(SSL *ssl)
+{
+    const char  *host = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+    SSL_SESSION *s;
+
+    if (!host) return;
+    s = SSL_get1_session(ssl);
+    if (!s) return;
+    if (!SSL_SESSION_is_resumable(s)) { SSL_SESSION_free(s); return; }
+    if (g_sess) SSL_SESSION_free(g_sess);
+    g_sess = s;
+    strncpy(g_sess_host, host, sizeof(g_sess_host) - 1);
+    g_sess_host[sizeof(g_sess_host) - 1] = '\0';
+}
+
+static void sess_forget(void)
+{
+    if (g_sess) SSL_SESSION_free(g_sess);
+    g_sess = NULL;
+    g_sess_host[0] = '\0';
+}
+
+/* ------------------------------------------------------------------ */
+/* Low-level: open TCP socket + TLS, return SSL* or NULL on error.      */
+/* *io_out tells why on NULL (IO_ABORT for Ctrl-C, else a failure).    */
 /* ------------------------------------------------------------------ */
 static SSL *tls_connect(const char *host, int port, int verify,
-                        AC_SOCKET *sock_out)
+                        AC_SOCKET *sock_out, int *io_out)
 {
     struct sockaddr_in addr;
     AC_SOCKET sock;
     SSL      *ssl;
+    int       r;
 
+    *io_out = IO_ERROR;
     HLOG("tls: resolving '%s'...\n", host);
     if (!resolve_host(host, &addr)) {
         HERR("amicloudcore: cannot resolve '%s'\n", host);
@@ -311,17 +458,8 @@ static SSL *tls_connect(const char *host, int port, int verify,
     }
     HLOG("tls: socket fd=%ld\n", (long)sock);
 
-    /* 30-second receive timeout — covers SSL_read in ssl_read_all */
-    {
-        struct timeval tv;
-        tv.tv_secs  = 30;
-        tv.tv_micro = 0;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(tv));
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char *)&tv, sizeof(tv));
-        HLOG("tls: SO_RCVTIMEO/SO_SNDTIMEO = 30s\n");
-    }
-
-    /* Non-blocking connect + WaitSelect so connect() never hangs forever */
+    /* Non-blocking for good: connect, handshake and all data transfer
+     * wait in WaitSelect() (see wait_sock()), never in the stack. */
     {
         LONG nb = 1;
         IoctlSocket(sock, FIONBIO, (char *)&nb);
@@ -331,24 +469,16 @@ static SSL *tls_connect(const char *host, int port, int verify,
     connect(sock, (struct sockaddr *)&addr, sizeof(addr)); /* EINPROGRESS expected */
 
     {
-        fd_set wfds;
-        struct timeval tv;
-        int sel, soerr;
+        int secs = g_timeout < CONNECT_TIMEOUT_MAX ? g_timeout : CONNECT_TIMEOUT_MAX;
+        int soerr;
         LONG soerr_len;  /* LONG* — Roadshow getsockopt erwartet LONG-Laenge */
 
-        FD_ZERO(&wfds);
-        FD_SET(sock, &wfds);
-        tv.tv_secs  = 30;
-        tv.tv_micro = 0;
-
-        HLOG("tls: WaitSelect(30s)...\n");
-        /* (void*) cast: Roadshow-struct timeval vs exec/types.h — gleiche Binaerlayout auf 68k */
-        sel = WaitSelect(sock + 1, NULL, &wfds, NULL, (void *)&tv, NULL);
-        HLOG("tls: WaitSelect returned %d\n", sel);
-
-        if (sel <= 0) {
-            HERR("amicloudcore: connect to %s:%d timed out\n", host, port);
+        r = wait_sock(sock, 1, secs);
+        if (r != IO_DONE) {
+            if (r == IO_TIMEOUT)
+                HERR("amicloudcore: connect to %s:%d timed out (%d s)\n", host, port, secs);
             CloseSocket(sock);
+            *io_out = r;
             return NULL;
         }
         soerr = 0; soerr_len = (LONG)sizeof(soerr);
@@ -361,13 +491,6 @@ static SSL *tls_connect(const char *host, int port, int verify,
         HLOG("tls: connect OK\n");
     }
 
-    /* Switch to blocking for SSL_connect — simpler than non-blocking handshake */
-    {
-        LONG nb = 0;
-        IoctlSocket(sock, FIONBIO, (char *)&nb);
-    }
-
-    HLOG("tls: SSL_new...\n");
     ssl = SSL_new(g_ssl_ctx);
     if (!ssl) {
         HERR("amicloudcore: SSL_new failed\n");
@@ -378,31 +501,48 @@ static SSL *tls_connect(const char *host, int port, int verify,
     SSL_set_verify(ssl, verify ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, NULL);
     SSL_set_fd(ssl, (int)sock);
     SSL_set_tlsext_host_name(ssl, host); /* SNI */
-    HLOG("tls: SSL_set_fd OK, verify=%d, SNI=%s\n", verify, host);
+    if (g_sess && strcmp(g_sess_host, host) == 0 && SSL_SESSION_is_resumable(g_sess))
+        SSL_set_session(ssl, g_sess);
+    HLOG("tls: SSL_connect (verify=%d, SNI=%s, session=%s)...\n",
+         verify, host, g_sess ? "offered" : "none");
 
-    HLOG("tls: SSL_connect...\n");
-    if (SSL_connect(ssl) != 1) {
-        HERR("amicloudcore: TLS handshake with %s failed\n", host);
-        SSL_free(ssl);
-        CloseSocket(sock);
-        return NULL;
+    for (;;) {
+        int n;
+        ERR_clear_error();
+        n = SSL_connect(ssl);
+        if (n == 1) break;
+        r = ssl_wait(ssl, sock, n);
+        if (r != IO_DONE) {
+            if (r == IO_TIMEOUT)
+                HERR("amicloudcore: TLS handshake with %s timed out (no data for %d s)\n", host, g_timeout);
+            else if (r != IO_ABORT)
+                HERR("amicloudcore: TLS handshake with %s failed\n", host);
+            /* A rejected or broken resumption must not poison the next try. */
+            if (r != IO_ABORT) sess_forget();
+            SSL_free(ssl);
+            CloseSocket(sock);
+            *io_out = r;
+            return NULL;
+        }
     }
-    HLOG("tls: SSL_connect OK, cipher=%s\n", SSL_get_cipher(ssl));
-
-    /* Re-enable non-blocking for data reads.
-     * ssl_read_all uses WaitSelect(30s) so SO_RCVTIMEO is not needed. */
-    {
-        LONG nb = 1;
-        IoctlSocket(sock, FIONBIO, (char *)&nb);
-    }
+    HLOG("tls: SSL_connect OK, cipher=%s, resumed=%d\n",
+         SSL_get_cipher(ssl), (int)SSL_session_reused(ssl));
 
     *sock_out = sock;
+    *io_out = IO_DONE;
     return ssl;
 }
 
 static void tls_close(SSL *ssl, AC_SOCKET sock)
 {
-    if (ssl)  { SSL_shutdown(ssl); SSL_free(ssl); }
+    if (ssl) {
+        /* Shutdown first: SSL_free() without it marks the session as not
+         * resumable. Non-blocking, so this sends close_notify at most --
+         * nobody waits for the server's answer. */
+        SSL_shutdown(ssl);
+        sess_remember(ssl);
+        SSL_free(ssl);
+    }
     if (sock != INVALID_SOCKET) CloseSocket(sock);
 }
 
@@ -413,6 +553,15 @@ static char      g_conn_host[256] = "";
 static int       g_conn_port      = 0;
 static AC_SOCKET g_conn_sock      = INVALID_SOCKET;
 static SSL      *g_conn_ssl       = NULL;
+/* time() after which the server will have dropped the idle connection
+ * (from its "Keep-Alive: timeout=N" header), 0 = unknown. Reusing a
+ * connection the server already closed costs a full request timeout in
+ * the worst case, so a known-dead one is never tried. */
+static long      g_conn_deadline  = 0;
+
+/* A request needs a moment to reach the server over a slow link; don't
+ * bet on the last seconds of its keep-alive window. */
+#define KEEPALIVE_MARGIN 2
 
 static void conn_cache_close(void)
 {
@@ -420,289 +569,329 @@ static void conn_cache_close(void)
         HLOG("conn: closing cached connection to %s:%d\n", g_conn_host, g_conn_port);
         tls_close(g_conn_ssl, g_conn_sock);
     }
-    g_conn_ssl     = NULL;
-    g_conn_sock    = INVALID_SOCKET;
-    g_conn_host[0] = '\0';
+    g_conn_ssl      = NULL;
+    g_conn_sock     = INVALID_SOCKET;
+    g_conn_host[0]  = '\0';
+    g_conn_deadline = 0;
 }
 
 /* Discards whatever's currently cached (closing it if it's a different,
  * still-open connection) and stores ssl/sock as the new cached
- * connection for host:port. Caller must only call this with a
+ * connection for host:port. keepalive_secs is the server's announced
+ * idle timeout (0 = unknown). Caller must only call this with a
  * connection it has just finished using and confirmed reusable (see
  * do_request()) -- this function itself does no framing validation. */
-static void conn_cache_store(const char *host, int port, SSL *ssl, AC_SOCKET sock)
+static void conn_cache_store(const char *host, int port, SSL *ssl, AC_SOCKET sock,
+                             long keepalive_secs)
 {
     conn_cache_close();
+    if (keepalive_secs > 0 && keepalive_secs <= KEEPALIVE_MARGIN) {
+        HLOG("conn: keep-alive window %lds too short, closing\n", keepalive_secs);
+        tls_close(ssl, sock);
+        return;
+    }
     strncpy(g_conn_host, host, sizeof(g_conn_host) - 1);
     g_conn_host[sizeof(g_conn_host) - 1] = '\0';
     g_conn_port = port;
     g_conn_ssl  = ssl;
     g_conn_sock = sock;
-    HLOG("conn: cached connection to %s:%d for reuse\n", host, port);
+    g_conn_deadline = keepalive_secs > 0
+                    ? (long)time(NULL) + keepalive_secs - KEEPALIVE_MARGIN : 0;
+    sess_remember(ssl);
+    HLOG("conn: cached connection to %s:%d for reuse (keep-alive %lds)\n",
+         host, port, keepalive_secs);
 }
 
 /* Removes and returns the cached connection if it matches host:port
- * (cache slot is empty afterward either way -- a caller that decides not
- * to use a hit must tls_close() it itself, never leave it half-taken).
- * Returns 1 on a hit (ssl/sock filled in), 0 on a miss. */
+ * and hasn't outlived the server's keep-alive window (cache slot is
+ * empty afterward either way -- a caller that decides not to use a hit
+ * must tls_close() it itself, never leave it half-taken). Returns 1 on
+ * a hit (ssl/sock filled in), 0 on a miss. */
 static int conn_cache_take(const char *host, int port, SSL **ssl, AC_SOCKET *sock)
 {
+    if (g_conn_ssl && g_conn_deadline && (long)time(NULL) >= g_conn_deadline) {
+        HLOG("conn: cached connection past its keep-alive window\n");
+        conn_cache_close();
+    }
     if (g_conn_ssl && g_conn_port == port && strcmp(g_conn_host, host) == 0) {
         HLOG("conn: reusing cached connection to %s:%d\n", host, port);
         *ssl  = g_conn_ssl;
         *sock = g_conn_sock;
-        g_conn_ssl     = NULL;
-        g_conn_sock    = INVALID_SOCKET;
-        g_conn_host[0] = '\0';
+        g_conn_ssl      = NULL;
+        g_conn_sock     = INVALID_SOCKET;
+        g_conn_host[0]  = '\0';
+        g_conn_deadline = 0;
         return 1;
     }
     return 0;
 }
 
 /* ------------------------------------------------------------------ */
-/* Read the full HTTP response into a malloc'd buffer.                  */
+/* Reading one HTTP response                                            */
 /* ------------------------------------------------------------------ */
 #define READ_CHUNK 4096
 
-/* find_body()/extract_header()/ci_eqn() are defined further down this
- * file, but ssl_read_response() needs them early (as soon as the header
- * block is fully received) to learn Content-Length/Transfer-Encoding/
- * Connection before the body finishes — forward declared here rather
- * than moving ~70 lines of code around. */
+/* find_body()/extract_header()/ci_eqn()/parse_status() are defined
+ * further down this file, but ssl_read_response() needs them early (as
+ * soon as the header block is fully received) to learn Content-Length/
+ * Transfer-Encoding/Connection before the body finishes. */
 static const char *find_body(const char *resp, size_t len);
 static void extract_header(const char *headers, size_t headers_len,
                            const char *name, char *out, size_t outsz);
 static int ci_eqn(const char *a, const char *b, size_t n);
+static int parse_status(const char *resp);
 
-/* Single WaitSelect(30s)+SSL_read cycle, appending whatever arrives to
- * *buf/*size (realloc'd as needed) and reporting progress. Shared by all
- * three body-framing strategies below. Returns 1 if >=1 byte was
- * appended, 0 on clean shutdown/timeout/error/malloc failure/user-abort
- * (check *aborted_out to tell a genuine user cancel from the rest) --
- * callers interpret a 0 return according to which framing they're
- * using (see each function's own comment). */
-static int read_more(SSL *ssl, AC_SOCKET sock, char **buf, size_t *size,
-                     long progress_done, long progress_total,
-                     const char *display_name, int *aborted_out)
+/* State of one response being read. buf holds the header block and,
+ * unless the body is streamed to fp, the body behind it. */
+typedef struct {
+    SSL        *ssl;
+    AC_SOCKET   sock;
+    char       *buf;
+    size_t      size;
+    size_t      header_len;     /* 0 until the header block is complete */
+    int         status;
+    long        total_body;     /* Content-Length, -1 if none */
+    int         chunked;
+    int         conn_close;
+    long        keepalive;      /* "Keep-Alive: timeout=N", 0 if absent */
+    /* Body sink: a 2xx body goes straight to fp (and md5) as it arrives
+     * instead of piling up in RAM -- an 8 MB Amiga can't hold a large
+     * download twice. Other statuses (error JSON) stay in buf. */
+    FILE       *fp;
+    Md5Ctx     *md5;
+    int         streaming;
+    long        flushed;        /* body bytes already handed to fp */
+    long        progress_base;  /* bytes delivered by earlier resumed parts */
+    const char *display_name;
+} ReadCtx;
+
+/* Body bytes received so far, wherever they went. */
+static long body_received(const ReadCtx *c)
+{
+    return c->flushed + (c->header_len ? (long)(c->size - c->header_len) : 0);
+}
+
+/* Hands buf[header_len..size) to the sink and drops it from buf. */
+static int flush_body(ReadCtx *c)
+{
+    size_t n = c->size - c->header_len;
+    if (!c->streaming || n == 0) return IO_DONE;
+    if (fwrite(c->buf + c->header_len, 1, n, c->fp) != n) {
+        HERR("amicloudcore: cannot write downloaded data (disk full?)\n");
+        return IO_ERROR;
+    }
+    if (c->md5) md5_update(c->md5, (const unsigned char *)c->buf + c->header_len, n);
+    c->flushed += (long)n;
+    c->size = c->header_len;
+    c->buf[c->size] = '\0';
+    return IO_DONE;
+}
+
+/* One SSL_read() (waiting as long as needed, see wait_sock()) appended
+ * to c->buf, then a progress report. Returns IO_DONE if >= 1 byte
+ * arrived, otherwise the reason it didn't. */
+static int read_more(ReadCtx *c)
 {
     char tmp[READ_CHUNK];
     for (;;) {
-        int n;
-        if (SSL_pending(ssl) == 0) {
-            fd_set rfds;
-            struct timeval tv;
-            int sel;
-            FD_ZERO(&rfds);
-            FD_SET(sock, &rfds);
-            tv.tv_secs  = 30;
-            tv.tv_micro = 0;
-            sel = WaitSelect(sock + 1, &rfds, NULL, NULL, (void *)&tv, NULL);
-            HLOG("read: WaitSelect=%d\n", sel);
-            if (sel <= 0) {
-                HERR("amicloudcore: read timeout (30s) after %lu bytes\n", (unsigned long)*size);
-                return 0;
-            }
-        }
-        n = SSL_read(ssl, tmp, READ_CHUNK);
+        int n, r;
+        ERR_clear_error();
+        n = SSL_read(c->ssl, tmp, READ_CHUNK);
         if (n > 0) {
-            char *nb = realloc(*buf, *size + (size_t)n + 1);
-            if (!nb) return 0;
-            *buf = nb;
-            memcpy(*buf + *size, tmp, (size_t)n);
-            *size += (size_t)n;
-            (*buf)[*size] = '\0';
-            HLOG("read: +%d bytes (total %lu)\n", n, (unsigned long)*size);
-            if (!ui_progress(progress_done, progress_total, display_name)) {
+            char *nb = realloc(c->buf, c->size + (size_t)n + 1);
+            long total;
+            if (!nb) { HERR("amicloudcore: out of memory\n"); return IO_ERROR; }
+            c->buf = nb;
+            memcpy(c->buf + c->size, tmp, (size_t)n);
+            c->size += (size_t)n;
+            c->buf[c->size] = '\0';
+            HLOG("read: +%d bytes (total %lu)\n", n, (unsigned long)c->size);
+            total = (c->header_len && c->total_body >= 0) ? c->progress_base + c->total_body : -1;
+            if (!ui_progress(c->progress_base + body_received(c), total, c->display_name)) {
                 HLOG("read: cancelled by progress hook\n");
-                *aborted_out = 1;
-                return 0;
+                return IO_ABORT;
             }
-            return 1;
-        } else if (n == 0) {
-            HLOG("read: clean shutdown\n");
-            return 0;
-        } else {
-            int err = SSL_get_error(ssl, n);
-            if (err == SSL_ERROR_WANT_READ) continue; /* WaitSelect again */
-            HLOG("read: SSL_read error %d\n", err);
-            return 0;
+            return IO_DONE;
+        }
+        r = ssl_wait(c->ssl, c->sock, n);
+        if (r != IO_DONE) {
+            HLOG("read: stopped after %lu bytes: %s\n", (unsigned long)c->size, io_text(r));
+            return r;
         }
     }
 }
 
-/* Original pre-keep-alive framing: read until the peer closes the
- * connection, or a genuine timeout/error/abort occurs -- used whenever a
- * response has neither Content-Length nor chunked Transfer-Encoding
- * (nothing else tells us where the body ends). Always returns 1 (best-
- * effort partial body on timeout/error, matching the old ssl_read_all()'s
- * behaviour exactly) except on a user-abort, which the caller must still
- * treat as "stop, don't reuse" -- see *aborted_out. The connection is
- * NEVER reusable after this path regardless of outcome (the close is
- * literally how we knew we were done). */
-static int read_body_until_close(SSL *ssl, AC_SOCKET sock, char **buf, size_t *size,
-                                 size_t header_len, long total_body,
-                                 const char *display_name, int *aborted_out)
+/* No Content-Length, no chunking: the body ends when the server closes
+ * the connection. Only a clean close counts as complete -- a timeout or
+ * reset means the body is cut short. Never reusable afterward. */
+static int read_body_until_close(ReadCtx *c)
 {
     for (;;) {
-        long body_done = (long)(*size - header_len);
-        if (!read_more(ssl, sock, buf, size, body_done, total_body, display_name, aborted_out))
-            return 1; /* clean shutdown, timeout, or error -- all end the read here */
+        int r = flush_body(c);
+        if (r != IO_DONE) return r;
+        r = read_more(c);
+        if (r == IO_EOF) return flush_body(c);
+        if (r != IO_DONE) return r;
     }
 }
 
-/* Reads until exactly header_len+content_len bytes are in *buf (i.e.
- * content_len bytes of body beyond the already-buffered header block).
- * Returns 1 on success (connection may be reused afterward), 0 on
- * timeout/short-close/error/abort (caller must not reuse the connection
- * -- our position in the byte stream is no longer at a response
- * boundary). */
-static int read_body_exact(SSL *ssl, AC_SOCKET sock, char **buf, size_t *size,
-                           size_t header_len, long content_len,
-                           const char *display_name, int *aborted_out)
+/* Reads until exactly total_body bytes of body arrived. IO_DONE means
+ * complete (connection may be reused afterward); anything else means
+ * the body is incomplete and the connection is no longer at a response
+ * boundary. */
+static int read_body_exact(ReadCtx *c)
 {
-    size_t want_total = header_len + (content_len > 0 ? (size_t)content_len : 0);
-    while (*size < want_total) {
-        long body_done = (long)(*size - header_len);
-        if (!read_more(ssl, sock, buf, size, body_done, content_len, display_name, aborted_out))
-            return 0;
+    for (;;) {
+        int r = flush_body(c);
+        if (r != IO_DONE) return r;
+        if (body_received(c) >= c->total_body) return IO_DONE;
+        r = read_more(c);
+        if (r != IO_DONE) return r;
     }
-    return 1;
 }
 
-/* Decodes an HTTP/1.1 chunked body IN PLACE within *buf, starting right
- * after the header block (header_len) -- removes each chunk-size line
- * and its trailing CRLF as it goes, so *buf ends up holding a plain,
- * unchunked body exactly like a Content-Length response would (every
- * other body-extraction call site in this file stays chunking-unaware).
- * Returns 1 on success (0-length terminator chunk + trailer consumed;
- * connection may be reused afterward), 0 on malformed input, timeout,
- * I/O error, or abort (caller must not reuse the connection). */
-static int read_body_chunked(SSL *ssl, AC_SOCKET sock, char **buf, size_t *size,
-                             size_t header_len, const char *display_name,
-                             int *aborted_out)
+/* Decodes an HTTP/1.1 chunked body IN PLACE within c->buf, starting
+ * right after the header block -- removes each chunk-size line and its
+ * trailing CRLF as it goes, so the buffer ends up holding a plain body
+ * exactly like a Content-Length response would. When streaming, every
+ * decoded chunk goes to the sink right away and the raw remainder moves
+ * back down to the end of the header block. IO_DONE means the 0-length
+ * terminator chunk and trailer were consumed (connection reusable). */
+static int read_body_chunked(ReadCtx *c)
 {
-    size_t cursor = header_len; /* unparsed raw wire bytes start here */
-    size_t write  = header_len; /* decoded body is compacted down to here */
-    long   body_done = 0;
+    size_t cursor = c->header_len; /* unparsed raw wire bytes start here */
+    size_t write  = c->header_len; /* decoded body is compacted down to here */
 
     for (;;) {
         char *eol;
+        int   r;
 
-        while ((eol = (char *)memchr(*buf + cursor, '\n', *size - cursor)) == NULL) {
-            if (!read_more(ssl, sock, buf, size, body_done, -1, display_name, aborted_out))
-                return 0;
+        while ((eol = (char *)memchr(c->buf + cursor, '\n', c->size - cursor)) == NULL) {
+            r = read_more(c);
+            if (r != IO_DONE) return r;
         }
 
         {
             long  chunk_size;
             char *p;
-            chunk_size = strtol(*buf + cursor, &p, 16); /* stops at ';ext' or '\r' on its own */
-            if (p == *buf + cursor || chunk_size < 0) {
+            chunk_size = strtol(c->buf + cursor, &p, 16); /* stops at ';ext' or '\r' on its own */
+            if (p == c->buf + cursor || chunk_size < 0) {
                 HERR("amicloudcore: malformed chunk size\n");
-                return 0;
+                return IO_ERROR;
             }
-            cursor = (size_t)(eol - *buf) + 1; /* past the size line's terminating \n */
+            cursor = (size_t)(eol - c->buf) + 1; /* past the size line's terminating \n */
 
             if (chunk_size == 0) {
                 /* Terminator chunk -- consume trailer headers (almost
                  * always none) up to and including the final blank line. */
                 for (;;) {
-                    if (cursor + 1 < *size && (*buf)[cursor] == '\r' && (*buf)[cursor + 1] == '\n') {
+                    if (cursor + 1 < c->size && c->buf[cursor] == '\r' && c->buf[cursor + 1] == '\n') {
                         cursor += 2;
                         break;
                     }
                     {
-                        const char *tail_end = find_body(*buf + cursor, *size - cursor);
-                        if (tail_end) { cursor = (size_t)(tail_end - *buf); break; }
+                        const char *tail_end = find_body(c->buf + cursor, c->size - cursor);
+                        if (tail_end) { cursor = (size_t)(tail_end - c->buf); break; }
                     }
-                    if (!read_more(ssl, sock, buf, size, body_done, -1, display_name, aborted_out)) {
-                        /* A clean shutdown right after "0\r\n" (no final
-                         * CRLF byte) is common enough server behaviour to
-                         * tolerate rather than fail on -- but only a clean
-                         * shutdown, never a timeout/error/abort. */
-                        if (*aborted_out) return 0;
-                        break;
-                    }
+                    r = read_more(c);
+                    /* A clean shutdown right after "0\r\n" (no final CRLF
+                     * byte) is common enough server behaviour to tolerate
+                     * -- the body itself is complete at this point. */
+                    if (r == IO_EOF) break;
+                    if (r != IO_DONE) return r;
                 }
-                *size = write;
-                (*buf)[*size] = '\0';
-                return 1;
+                c->size = write;
+                c->buf[c->size] = '\0';
+                return flush_body(c);
             }
 
-            while (*size < cursor + (size_t)chunk_size + 2) {
-                if (!read_more(ssl, sock, buf, size, body_done, -1, display_name, aborted_out))
-                    return 0;
+            while (c->size < cursor + (size_t)chunk_size + 2) {
+                r = read_more(c);
+                if (r != IO_DONE) return r;
             }
 
-            if (write != cursor) memmove(*buf + write, *buf + cursor, (size_t)chunk_size);
-            write     += (size_t)chunk_size;
-            cursor    += (size_t)chunk_size + 2; /* data + its trailing \r\n */
-            body_done += chunk_size;
+            if (write != cursor) memmove(c->buf + write, c->buf + cursor, (size_t)chunk_size);
+            write  += (size_t)chunk_size;
+            cursor += (size_t)chunk_size + 2; /* data + its trailing \r\n */
+
+            if (c->streaming) {
+                /* Sink the decoded part, keep the undecoded rest. */
+                size_t rest = c->size - cursor;
+                c->size = write;
+                r = flush_body(c);
+                if (r != IO_DONE) return r;
+                memmove(c->buf + c->header_len, c->buf + cursor, rest);
+                c->size = c->header_len + rest;
+                cursor = c->header_len;
+                write  = c->header_len;
+            }
         }
     }
 }
 
-/* Reads one full HTTP response (headers + framing-appropriate body) into
- * a malloc'd buffer, exactly like the old ssl_read_all() did -- callers
- * (do_request()) still just find_body()/parse_status()/extract_header()
- * against the result unchanged. *reusable_out tells do_request() whether
- * ssl/sock are still at a clean response boundary and safe to hand to
- * conn_cache_store() (see this file's header comment for the framing
- * rules that decide this). */
-static char *ssl_read_response(SSL *ssl, AC_SOCKET sock, size_t *out_len,
-                               const char *display_name, int *aborted_out,
-                               int *reusable_out)
+/* Reads one full HTTP response (headers + framing-appropriate body).
+ * Returns IO_DONE when it arrived complete; otherwise c->header_len
+ * tells whether at least the header block made it (0 = nothing usable).
+ * *reusable_out tells do_request() whether ssl/sock are still at a clean
+ * response boundary and safe to hand to conn_cache_store(). */
+static int ssl_read_response(ReadCtx *c, int *reusable_out)
 {
-    char   *buf  = NULL;
-    size_t  size = 0;
-    size_t  header_len = 0;
-    long    total_body = -1;
-    int     chunked    = 0;
-    int     conn_close = 0;
-    int     ok;
+    int r;
 
-    *aborted_out  = 0;
     *reusable_out = 0;
     HLOG("read: waiting for response...\n");
 
     /* Phase 1: headers. */
     for (;;) {
         const char *body_start;
-        if (!read_more(ssl, sock, &buf, &size, 0, -1, display_name, aborted_out)) {
-            *out_len = size;
-            return buf; /* timeout/shutdown/error/abort before headers ever completed */
-        }
-        body_start = find_body(buf, size);
+        r = read_more(c);
+        if (r != IO_DONE) return r;
+        body_start = find_body(c->buf, c->size);
         if (body_start) {
-            char clbuf[32], tebuf[64], connbuf[32];
-            header_len = (size_t)(body_start - buf);
-            extract_header(buf, header_len, "Content-Length:", clbuf, sizeof(clbuf));
-            total_body = clbuf[0] ? atol(clbuf) : -1;
-            extract_header(buf, header_len, "Transfer-Encoding:", tebuf, sizeof(tebuf));
-            chunked = (tebuf[0] && strstr(tebuf, "chunked") != NULL);
-            extract_header(buf, header_len, "Connection:", connbuf, sizeof(connbuf));
-            conn_close = (connbuf[0] && ci_eqn(connbuf, "close", 5));
-            HLOG("read: headers complete (%lu bytes), Content-Length=%ld, chunked=%d, conn_close=%d\n",
-                 (unsigned long)header_len, total_body, chunked, conn_close);
+            char clbuf[32], tebuf[64], connbuf[32], kabuf[64];
+            const char *t;
+            c->header_len = (size_t)(body_start - c->buf);
+            c->status = parse_status(c->buf);
+            extract_header(c->buf, c->header_len, "Content-Length:", clbuf, sizeof(clbuf));
+            c->total_body = clbuf[0] ? atol(clbuf) : -1;
+            extract_header(c->buf, c->header_len, "Transfer-Encoding:", tebuf, sizeof(tebuf));
+            c->chunked = (tebuf[0] && strstr(tebuf, "chunked") != NULL);
+            extract_header(c->buf, c->header_len, "Connection:", connbuf, sizeof(connbuf));
+            c->conn_close = (connbuf[0] && ci_eqn(connbuf, "close", 5));
+            extract_header(c->buf, c->header_len, "Keep-Alive:", kabuf, sizeof(kabuf));
+            t = strstr(kabuf, "timeout=");
+            c->keepalive = t ? atol(t + 8) : 0;
+            if (c->chunked) c->total_body = -1;
+            /* No body by definition (RFC 9110 6.4.1) -- without this a
+             * 204 to a DELETE would wait for the server to close. */
+            if (c->status == 204 || c->status == 304 || (c->status >= 100 && c->status < 200)) {
+                c->chunked = 0;
+                c->total_body = 0;
+            }
+            c->streaming = (c->fp && c->status >= 200 && c->status < 300);
+            HLOG("read: headers complete (%lu bytes), status=%d, Content-Length=%ld, chunked=%d, "
+                 "conn_close=%d, keep-alive=%ld\n",
+                 (unsigned long)c->header_len, c->status, c->total_body, c->chunked,
+                 c->conn_close, c->keepalive);
             break;
         }
     }
 
     /* Phase 2: body, framed according to what phase 1 found. */
-    if (chunked) {
-        ok = read_body_chunked(ssl, sock, &buf, &size, header_len, display_name, aborted_out);
-        *reusable_out = ok && !conn_close;
-    } else if (total_body >= 0) {
-        ok = read_body_exact(ssl, sock, &buf, &size, header_len, total_body, display_name, aborted_out);
-        *reusable_out = ok && !conn_close;
+    if (c->chunked) {
+        r = read_body_chunked(c);
+        *reusable_out = (r == IO_DONE) && !c->conn_close;
+    } else if (c->total_body >= 0) {
+        r = read_body_exact(c);
+        *reusable_out = (r == IO_DONE) && !c->conn_close;
     } else {
-        read_body_until_close(ssl, sock, &buf, &size, header_len, total_body, display_name, aborted_out);
+        r = read_body_until_close(c);
         *reusable_out = 0; /* the close is how we knew we were done -- nothing left to reuse */
     }
 
-    HLOG("read: done, %lu bytes total, reusable=%d\n", (unsigned long)size, *reusable_out);
-    *out_len = size;
-    return buf;
+    HLOG("read: done, %ld body bytes, %s, reusable=%d\n",
+         body_received(c), r == IO_DONE ? "complete" : io_text(r), *reusable_out);
+    return r;
 }
 
 /* ------------------------------------------------------------------ */
@@ -744,8 +933,8 @@ static int ci_eqn(const char *a, const char *b, size_t n)
     return 1;
 }
 
-/* Pick "X-AmiCloud-MD5: <value>" out of the raw header block (headers_len
- * bytes starting at raw — everything before the \r\n\r\n body separator).
+/* Pick "<name> <value>" out of the raw header block (headers_len bytes
+ * starting at headers — everything before the \r\n\r\n body separator).
  * out[0] stays '\0' if the header isn't present. */
 static void extract_header(const char *headers, size_t headers_len,
                            const char *name, char *out, size_t outsz)
@@ -772,8 +961,183 @@ static void extract_header(const char *headers, size_t headers_len,
 }
 
 /* ------------------------------------------------------------------ */
-/* Core request function                                                */
+/* One request/response exchange                                        */
 /* ------------------------------------------------------------------ */
+
+/* Sends the request on a cached or fresh connection and reads the
+ * response into *c (see ReadCtx). Returns the ssl_read_response()
+ * result, or the reason no response could be read at all (then
+ * c->header_len stays 0).
+ *
+ * At most 2 attempts: a connection taken from the cache (attempt 0)
+ * might have been closed by the server in the meantime even though its
+ * keep-alive window looked fine -- that shows as an immediate close or
+ * reset while sending, or as a close before a single response byte
+ * arrived. Then attempt 1 retries the whole request once on a fresh
+ * connection. A *timeout* is never retried: it means the server or the
+ * line is slow, not that the connection was stale, and the server may
+ * well be executing the request already (a repeated MOVE/DELETE/upload
+ * would then run twice). */
+static int exchange(const char *method, const char *host, int port, const char *path,
+                    const char *auth_val, const char *extra,
+                    const char *upload_data, long upload_len,
+                    FILE *upload_fp, long upload_fsize, long upload_fp_start,
+                    long range_from, int verify_ssl, ReadCtx *c)
+{
+    int attempt;
+
+    for (attempt = 0; attempt < 2; attempt++) {
+        AC_SOCKET sock = INVALID_SOCKET;
+        SSL      *ssl  = NULL;
+        int       reused = 0;
+        int       reusable = 0;
+        int       r;
+        char      req_head[2048];
+        char      range[48];
+        long      body_len;
+        int       req_len;
+        /* Eigener Content-Type in extra_headers ersetzt den Default */
+        int have_ctype = (strstr(extra, "Content-Type:") != NULL ||
+                          strstr(extra, "content-type:") != NULL);
+
+        if (attempt == 0 && conn_cache_take(host, port, &ssl, &sock)) {
+            reused = 1;
+        } else {
+            ssl = tls_connect(host, port, verify_ssl, &sock, &r);
+            if (!ssl) return r;
+        }
+
+        if (upload_fp) fseek(upload_fp, upload_fp_start, SEEK_SET);
+
+        body_len = (upload_data && upload_len > 0) ? upload_len
+                 : (upload_fp && upload_fsize > 0) ? upload_fsize : 0;
+        range[0] = '\0';
+        if (range_from > 0) snprintf(range, sizeof(range), "Range: bytes=%ld-\r\n", range_from);
+
+        /* HTTP/1.1, no explicit Connection header -- persistent by
+         * default (see this file's header comment); the server tells
+         * us via its OWN "Connection: close" response header if it
+         * intends to close anyway (checked in ssl_read_response()). */
+        req_len = snprintf(req_head, sizeof(req_head),
+            "%s %s HTTP/1.1\r\n"
+            "Host: %s\r\n"
+            "Authorization: %s\r\n"
+            "%s"
+            "%s"
+            "%s"
+            "Content-Length: %ld\r\n"
+            "\r\n",
+            method, path, host, auth_val, range,
+            (body_len > 0 && !have_ctype) ? "Content-Type: application/octet-stream\r\n" : "",
+            extra, body_len);
+        if (req_len >= (int)sizeof(req_head)) {
+            HERR("amicloudcore: request header too large\n");
+            tls_close(ssl, sock);
+            return IO_ERROR;
+        }
+
+        HLOG("http: sending %d header bytes\n", req_len);
+        r = ssl_write_all(ssl, sock, req_head, req_len);
+
+        if (r == IO_DONE && upload_data && upload_len > 0) {
+            long sent = 0;
+            HLOG("http: sending %ld body bytes\n", upload_len);
+            while (sent < upload_len) {
+                int n = (int)(upload_len - sent < 16384 ? upload_len - sent : 16384);
+                r = ssl_write_all(ssl, sock, upload_data + sent, n);
+                if (r != IO_DONE) break;
+                sent += n;
+                /* Small bodies (JSON, a tiny file) aren't worth a progress line. */
+                if (upload_len > 16384 && !ui_progress(sent, upload_len, c->display_name)) {
+                    r = IO_ABORT;
+                    break;
+                }
+            }
+            HLOG("http: body sent (%ld of %ld bytes)\n", sent, upload_len);
+        } else if (r == IO_DONE && upload_fp && upload_fsize > 0) {
+            /* Streamed from disk in fixed-size chunks instead of one big
+             * malloc'd buffer (GUI-Commander-plan section 5.3) — an 8 MB
+             * Amiga can't hold a large upload in RAM. */
+            static char chunk[16384]; /* static: keeps 16 KB off a 64 KB stack */
+            long sent = 0;
+            HLOG("http: streaming %ld body bytes from disk\n", upload_fsize);
+            while (sent < upload_fsize) {
+                size_t want = (size_t)((upload_fsize - sent) < (long)sizeof(chunk)
+                                       ? (upload_fsize - sent) : (long)sizeof(chunk));
+                size_t got = fread(chunk, 1, want, upload_fp);
+                if (got == 0) {
+                    HERR("amicloudcore: cannot read upload data\n");
+                    r = IO_ERROR;
+                    break;
+                }
+                r = ssl_write_all(ssl, sock, chunk, (int)got);
+                if (r != IO_DONE) break;
+                sent += (long)got;
+                if (!ui_progress(sent, upload_fsize, c->display_name)) { r = IO_ABORT; break; }
+            }
+            HLOG("http: body sent (%ld of %ld bytes)\n", sent, upload_fsize);
+        }
+
+        if (r != IO_DONE) {
+            tls_close(ssl, sock);
+            if (reused && attempt == 0 && (r == IO_EOF || r == IO_ERROR)) {
+                HLOG("http: reused connection was stale (send failed) -- retrying fresh\n");
+                continue;
+            }
+            if (r == IO_TIMEOUT)
+                HERR("amicloudcore: sending to %s timed out (no progress for %d s)\n", host, g_timeout);
+            else if (r != IO_ABORT)
+                HERR("amicloudcore: failed to send request to %s (%s)\n", host, io_text(r));
+            return r;
+        }
+
+        c->ssl  = ssl;
+        c->sock = sock;
+        r = ssl_read_response(c, &reusable);
+
+        if (c->header_len == 0) {
+            int nothing = (c->size == 0);
+            free(c->buf);
+            c->buf  = NULL;
+            c->size = 0;
+            tls_close(ssl, sock);
+            if (reused && attempt == 0 && nothing && (r == IO_EOF || r == IO_ERROR)) {
+                HLOG("http: reused connection was stale (closed before answering) -- retrying fresh\n");
+                continue;
+            }
+            if (r == IO_TIMEOUT)
+                HERR("amicloudcore: no response from %s within %d s\n", host, g_timeout);
+            else if (r != IO_ABORT)
+                HERR("amicloudcore: no response received from %s (%s)\n", host, io_text(r));
+            return r == IO_DONE ? IO_ERROR : r;
+        }
+
+        if (reusable) conn_cache_store(host, port, ssl, sock, c->keepalive);
+        else          tls_close(ssl, sock);
+        return r;
+    }
+
+    return IO_ERROR; /* unreachable -- every path above returns or continues */
+}
+
+/* ------------------------------------------------------------------ */
+/* Core request function                                                */
+/*                                                                      */
+/* A GET whose body breaks off (timeout, reset) is resumed with a Range */
+/* request from where it stopped, up to MAX_RESUMES times as long as   */
+/* each try made progress -- instead of failing a 95 % finished modem   */
+/* download outright. Only for plain Content-Length bodies (byte ranges */
+/* are meaningless for a chunked one) and only if the server answers   */
+/* 206; the AmiCloud server and every WebDAV server do. The MD5 header */
+/* of the first response still covers the whole file, and the streamed*/
+/* MD5 context simply continues, so callers verify exactly as before.  */
+/*                                                                      */
+/* Result: NULL if no response header arrived at all, otherwise an     */
+/* HttpResponse. status_code 0 means the transfer failed part-way      */
+/* (body incomplete) -- callers already treat 0 as a network error.    */
+/* ------------------------------------------------------------------ */
+#define MAX_RESUMES 5
+
 static HttpResponse *do_request(const char *method, const char *url,
                                 const char *auth, const char *extra_headers,
                                 const char *upload_data, long upload_len,
@@ -784,7 +1148,14 @@ static HttpResponse *do_request(const char *method, const char *url,
     char host[256], path[AC_MAX_URL];
     int  port;
     long upload_fp_start = upload_fp ? ftell(upload_fp) : 0;
-    int  attempt;
+    const char *extra = (extra_headers && *extra_headers) ? extra_headers : "";
+    int  can_resume = (strcmp(method, "GET") == 0 && !upload_data && !upload_fp);
+    char *auth_val;
+    HttpResponse *resp;
+    char *body = NULL;      /* in-memory body, collected across resumed parts */
+    long  body_len = 0;
+    long  delivered = 0;    /* body bytes delivered so far (memory or file) */
+    int   resumes;
 
     HLOG("http: %s %s\n", method, url);
 
@@ -794,216 +1165,94 @@ static HttpResponse *do_request(const char *method, const char *url,
     }
     HLOG("http: host=%s port=%d path=%s\n", host, port, path);
 
-    /* At most 2 attempts: a connection taken from the cache (attempt 0)
-     * might have been silently closed by the server in the meantime (an
-     * idle keep-alive timeout) -- detected below as "wrote nothing" or
-     * "got nothing back" -- in which case attempt 1 forces a guaranteed-
-     * fresh tls_connect() and retries the whole request once. A fresh
-     * connection failing is always a hard error, no retry (matches the
-     * pre-keep-alive behaviour exactly). */
-    for (attempt = 0; attempt < 2; attempt++) {
-        AC_SOCKET sock = INVALID_SOCKET;
-        SSL      *ssl  = NULL;
-        char     *raw  = NULL;
-        size_t    raw_len = 0;
-        int       aborted     = 0;
-        int       reusable    = 0;
-        int       reused      = 0;
-        int       write_failed = 0;
-        HttpResponse *resp = NULL;
-
-        if (attempt == 0 && conn_cache_take(host, port, &ssl, &sock)) {
-            reused = 1;
-        } else {
-            ssl = tls_connect(host, port, verify_ssl, &sock);
-            if (!ssl) return NULL;
-        }
-
-        if (upload_fp) fseek(upload_fp, upload_fp_start, SEEK_SET);
-
-        {
-            char *auth_val = make_basic_auth(auth);
-            char req_head[2048];
-            int  req_len;
-            int  hdr_sent;
-
-            const char *extra = (extra_headers && *extra_headers) ? extra_headers : "";
-            /* Eigener Content-Type in extra_headers ersetzt den Default */
-            int have_ctype = (strstr(extra, "Content-Type:") != NULL ||
-                              strstr(extra, "content-type:") != NULL);
-
-            if (!auth_val) { tls_close(ssl, sock); return NULL; }
-
-            /* HTTP/1.1, no explicit Connection header -- persistent by
-             * default (see this file's header comment); the server tells
-             * us via its OWN "Connection: close" response header if it
-             * intends to close anyway (checked in ssl_read_response()). */
-            if (upload_data && upload_len > 0) {
-                req_len = snprintf(req_head, sizeof(req_head),
-                    "%s %s HTTP/1.1\r\n"
-                    "Host: %s\r\n"
-                    "Authorization: %s\r\n"
-                    "%s"
-                    "%s"
-                    "Content-Length: %ld\r\n"
-                    "\r\n",
-                    method, path, host, auth_val,
-                    have_ctype ? "" : "Content-Type: application/octet-stream\r\n",
-                    extra, upload_len);
-            } else if (upload_fp && upload_fsize > 0) {
-                req_len = snprintf(req_head, sizeof(req_head),
-                    "%s %s HTTP/1.1\r\n"
-                    "Host: %s\r\n"
-                    "Authorization: %s\r\n"
-                    "%s"
-                    "%s"
-                    "Content-Length: %ld\r\n"
-                    "\r\n",
-                    method, path, host, auth_val,
-                    have_ctype ? "" : "Content-Type: application/octet-stream\r\n",
-                    extra, upload_fsize);
-            } else {
-                req_len = snprintf(req_head, sizeof(req_head),
-                    "%s %s HTTP/1.1\r\n"
-                    "Host: %s\r\n"
-                    "Authorization: %s\r\n"
-                    "%s"
-                    "Content-Length: 0\r\n"
-                    "\r\n",
-                    method, path, host, auth_val, extra);
-            }
-            free(auth_val);
-            if (req_len >= (int)sizeof(req_head)) {
-                HERR("amicloudcore: request header too large\n");
-                tls_close(ssl, sock);
-                return NULL;
-            }
-
-            HLOG("http: sending %d header bytes\n", req_len);
-            hdr_sent = SSL_write(ssl, req_head, req_len);
-            if (hdr_sent <= 0) write_failed = 1;
-
-            if (!write_failed && upload_data && upload_len > 0) {
-                long sent = 0;
-                HLOG("http: sending %ld body bytes\n", upload_len);
-                while (sent < upload_len) {
-                    int n = SSL_write(ssl, upload_data + sent,
-                                      (int)(upload_len - sent < 16384 ? upload_len - sent : 16384));
-                    if (n <= 0) { write_failed = 1; break; }
-                    sent += n;
-                }
-                HLOG("http: body sent (%ld bytes)\n", upload_len);
-            } else if (!write_failed && upload_fp && upload_fsize > 0) {
-                /* Streamed from disk in fixed-size chunks instead of one big
-                 * malloc'd buffer (GUI-Commander-plan section 5.3) — an 8 MB
-                 * Amiga can't hold a large upload in RAM. */
-                unsigned char chunk[16384];
-                long sent = 0;
-                HLOG("http: streaming %ld body bytes from disk\n", upload_fsize);
-                while (sent < upload_fsize) {
-                    size_t want = (size_t)((upload_fsize - sent) < (long)sizeof(chunk)
-                                           ? (upload_fsize - sent) : (long)sizeof(chunk));
-                    size_t got = fread(chunk, 1, want, upload_fp);
-                    size_t off = 0;
-                    if (got == 0) break;
-                    while (off < got) {
-                        int n = SSL_write(ssl, chunk + off, (int)(got - off));
-                        if (n <= 0) { got = off; write_failed = 1; break; }
-                        off += (size_t)n;
-                    }
-                    sent += (long)got;
-                    if (!ui_progress(sent, upload_fsize, display_name)) {
-                        HLOG("http: upload cancelled by progress hook\n");
-                        aborted = 1;
-                        break;
-                    }
-                    if (write_failed) break;
-                }
-                HLOG("http: body sent (%ld of %ld bytes)\n", sent, upload_fsize);
-            }
-        }
-
-        if (aborted) {
-            tls_close(ssl, sock);
-            resp = calloc(1, sizeof(HttpResponse));
-            if (resp) resp->aborted = 1;
-            return resp;
-        }
-
-        if (write_failed) {
-            tls_close(ssl, sock);
-            if (reused && attempt == 0) {
-                HLOG("http: reused connection was stale (write failed) -- retrying fresh\n");
-                continue;
-            }
-            HERR("amicloudcore: failed to send request to %s\n", host);
-            return NULL;
-        }
-
-        raw = ssl_read_response(ssl, sock, &raw_len, display_name, &aborted, &reusable);
-
-        if (reused && attempt == 0 && !aborted && raw_len == 0) {
-            HLOG("http: reused connection was stale (no data) -- retrying fresh\n");
-            free(raw);
-            tls_close(ssl, sock);
-            continue;
-        }
-
-        if (aborted) {
-            free(raw);
-            tls_close(ssl, sock);
-            resp = calloc(1, sizeof(HttpResponse));
-            if (resp) resp->aborted = 1;
-            return resp;
-        }
-
-        if (!raw) {
-            HERR("amicloudcore: no response received from %s\n", host);
-            tls_close(ssl, sock);
-            return NULL;
-        }
-
+    /* Ctrl-C from an earlier transfer still pending: a recursive get/put
+     * stops here instead of starting the next file. */
+    if (ui_break_pending()) {
         resp = calloc(1, sizeof(HttpResponse));
-        if (!resp) { free(raw); tls_close(ssl, sock); return NULL; }
-
-        resp->status_code = parse_status(raw);
-        HLOG("http: status %d, raw %lu bytes\n", resp->status_code, (unsigned long)raw_len);
-
-        {
-            const char *body_start = find_body(raw, raw_len);
-            if (body_start) {
-                size_t body_len = raw_len - (size_t)(body_start - raw);
-                HLOG("http: body %lu bytes\n", (unsigned long)body_len);
-
-                extract_header(raw, (size_t)(body_start - raw), "X-AmiCloud-MD5:",
-                               resp->md5_header, sizeof(resp->md5_header));
-
-                if (download_fp) {
-                    fwrite(body_start, 1, body_len, download_fp);
-                    if (md5ctx && body_len > 0)
-                        md5_update(md5ctx, (const unsigned char *)body_start, body_len);
-                } else {
-                    resp->body = malloc(body_len + 1);
-                    if (resp->body) {
-                        memcpy(resp->body, body_start, body_len);
-                        resp->body[body_len] = '\0';
-                        resp->body_len = (long)body_len;
-                    }
-                }
-            } else {
-                HLOG("http: no body separator found in response\n");
-            }
-        }
-
-        free(raw);
-
-        if (reusable) conn_cache_store(host, port, ssl, sock);
-        else           tls_close(ssl, sock);
-
+        if (resp) resp->aborted = 1;
         return resp;
     }
 
-    return NULL; /* unreachable -- every path above returns or continues */
+    auth_val = make_basic_auth(auth);
+    if (!auth_val) return NULL;
+    resp = calloc(1, sizeof(HttpResponse));
+    if (!resp) { free(auth_val); return NULL; }
+
+    for (resumes = 0; ; resumes++) {
+        ReadCtx c;
+        int r;
+        long got;
+
+        memset(&c, 0, sizeof(c));
+        c.fp            = download_fp;
+        c.md5           = md5ctx;
+        c.display_name  = display_name;
+        c.progress_base = delivered;
+
+        r = exchange(method, host, port, path, auth_val, extra,
+                     upload_data, upload_len, upload_fp, upload_fsize, upload_fp_start,
+                     resumes ? delivered : 0, verify_ssl, &c);
+
+        if (c.header_len == 0) {
+            /* Nothing usable came back from this try. */
+            if (r == IO_ABORT) resp->aborted = 1;
+            else if (resumes == 0) { free(auth_val); free(resp); return NULL; }
+            resp->status_code = 0;
+            break;
+        }
+
+        if (resumes == 0) {
+            resp->status_code = c.status;
+            extract_header(c.buf, c.header_len, "X-AmiCloud-MD5:",
+                           resp->md5_header, sizeof(resp->md5_header));
+        } else if (c.status != 206) {
+            HERR("amicloudcore: server answered HTTP %d to a resume request\n", c.status);
+            free(c.buf);
+            resp->status_code = 0;
+            break;
+        }
+
+        got = body_received(&c);
+        if (!c.streaming && c.size > c.header_len) {
+            /* Kept in memory (no fp, or a non-2xx answer): append. */
+            long n = (long)(c.size - c.header_len);
+            char *nb = realloc(body, (size_t)(body_len + n + 1));
+            if (!nb) {
+                HERR("amicloudcore: out of memory\n");
+                free(c.buf);
+                resp->status_code = 0;
+                break;
+            }
+            body = nb;
+            memcpy(body + body_len, c.buf + c.header_len, (size_t)n);
+            body_len += n;
+            body[body_len] = '\0';
+        }
+        delivered += got;
+        free(c.buf);
+
+        if (r == IO_DONE) break;
+        if (r == IO_ABORT) { resp->aborted = 1; resp->status_code = 0; break; }
+
+        if (can_resume && resp->status_code >= 200 && resp->status_code < 300
+            && !c.chunked && c.total_body > 0 && got > 0 && resumes < MAX_RESUMES) {
+            HERR("amicloudcore: connection to %s lost (%s) after %ld bytes -- resuming\n",
+                 host, io_text(r), delivered);
+            continue;
+        }
+        HERR("amicloudcore: transfer from %s incomplete (%s) after %ld bytes\n",
+             host, io_text(r), delivered);
+        resp->status_code = 0;
+        break;
+    }
+    free(auth_val);
+
+    /* With download_fp a 2xx body went to the file; body only holds a
+     * non-2xx answer then (error JSON), handy for the caller's message. */
+    resp->body     = body;
+    resp->body_len = body_len;
+    HLOG("http: status %d, %ld body bytes\n", resp->status_code, delivered);
+    return resp;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1171,6 +1420,8 @@ int http_init(void)
 
 void http_cleanup(void)
 {
+    conn_cache_close();
+    sess_forget();
     if (g_ssl_ctx)         { SSL_CTX_free(g_ssl_ctx);        g_ssl_ctx        = NULL; }
     if (AmiSSLInitialized) { CleanupAmiSSLA(NULL);           AmiSSLInitialized = FALSE; }
     if (AmiSSLBase)        { CloseAmiSSL();                  AmiSSLBase        = NULL; }
@@ -1203,15 +1454,20 @@ void http_warmup(const char *base_url, int verify_ssl)
     int  port;
     AC_SOCKET sock = INVALID_SOCKET;
     SSL *ssl;
+    int  io;
 
     if (!parse_url(base_url, host, sizeof(host), &port, path, sizeof(path))) {
         HLOG("warmup: bad URL, skipped\n");
         return;
     }
     HLOG("warmup: %s:%d (force DNS+cert cache)...\n", host, port);
-    ssl = tls_connect(host, port, verify_ssl, &sock);
+    ssl = tls_connect(host, port, verify_ssl, &sock, &io);
     if (ssl) {
-        tls_close(ssl, sock);
+        /* Kept for the first real request instead of thrown away: a
+         * full 68k handshake is far too expensive to waste. If the
+         * server closes it before then, that request notices and
+         * reconnects -- resuming this session, which is still cheaper. */
+        conn_cache_store(host, port, ssl, sock, 0);
         HLOG("warmup: OK — DNS and CA certs cached in memory\n");
     } else {
         HLOG("warmup: connect failed (non-fatal; first packet may still Guru)\n");

@@ -63,6 +63,9 @@ static void full_path(char *out, size_t sz,
 static void make_auth(char *out, size_t sz, const AcConfig *cfg)
 {
     snprintf(out, sz, "%s:%s", cfg->username, cfg->password);
+    /* Every request builds its credentials here first -- the one spot
+     * that sees the config right before talking to the server. */
+    http_set_timeout(cfg->timeout);
 }
 
 /* Percent-encodes in into out (RFC 3986 unreserved chars pass through
@@ -651,6 +654,12 @@ static const char *get_target(const char *local_path, const char *rpath,
 /* ------------------------------------------------------------------ */
 int cmd_get(const AcConfig *cfg, const char *remote_path, const char *local_path)
 {
+    return cmd_get_named(cfg, remote_path, local_path, NULL);
+}
+
+int cmd_get_named(const AcConfig *cfg, const char *remote_path, const char *local_path,
+                  const char *display_name)
+{
     char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH];
     const char *local;
     char local_buf[AC_MAX_PATH];
@@ -665,6 +674,7 @@ int cmd_get(const AcConfig *cfg, const char *remote_path, const char *local_path
     build_url(url, sizeof(url), cfg, "download", rpath);
 
     local = get_target(local_path, rpath, local_buf, sizeof(local_buf));
+    if (!display_name) display_name = local;
 
     fp = fopen(local, "wb");
     if (!fp) { ui_notify(UI_ERROR, "amicloudcore: get: cannot open local file '%s' for writing", local); return 1; }
@@ -673,21 +683,21 @@ int cmd_get(const AcConfig *cfg, const char *remote_path, const char *local_path
      * section 18.3) — cheap even on 68k, the bytes pass through the CPU
      * on the way to disk anyway. */
     md5_init(&md5ctx);
-    resp = http_download(url, auth, fp, cfg->verify_ssl, &md5ctx, local);
+    resp = http_download(url, auth, fp, cfg->verify_ssl, &md5ctx, display_name);
     g_last_status = resp ? resp->status_code : 0;
     fclose(fp);
 
     if (!resp || resp->status_code == 0) {
-        if (resp && resp->aborted) {
-            remove(local); /* cancelled via the progress hook - no partial file left behind */
-            http_response_free(resp);
-            return 1;
-        }
-        ui_notify(UI_ERROR, "amicloudcore: network error");
-        http_response_free(resp); return 1;
+        /* Cancelled or broken off (the HTTP layer already resumed what it
+         * could) -- either way no partial file is left behind. */
+        remove(local);
+        if (!(resp && resp->aborted)) ui_notify(UI_ERROR, "amicloudcore: network error");
+        http_response_free(resp);
+        return 1;
     }
     if (resp->status_code != 200) {
         ui_notify(UI_ERROR, "amicloudcore: server returned HTTP %d", resp->status_code);
+        remove(local);
         http_response_free(resp); return 1;
     }
 
@@ -704,7 +714,7 @@ int cmd_get(const AcConfig *cfg, const char *remote_path, const char *local_path
         return 1;
     }
 
-    ui_notify(UI_INFO, "Downloaded %s", local);
+    ui_notify(UI_INFO, "Downloaded %s", display_name);
     http_response_free(resp);
     return 0;
 }

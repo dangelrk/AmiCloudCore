@@ -75,6 +75,15 @@ int  ui_confirm(const char *fmt, ...);
 /* Straight passthrough, no formatting needed for a byte count. */
 int  ui_progress(long done, long total, const char *name);
 
+/* Ctrl-C (Amiga break signal). The HTTP layer stops waiting when it
+ * arrives and leaves it set, so a loop over many files (get -r, sync)
+ * ends instead of starting the next transfer; ui_break_pending() lets
+ * any loop check it. Interactive programs call ui_break_clear() before
+ * each new command (shell prompt, GUI action). Always 0 / no-op on PC,
+ * where Ctrl-C simply ends the program. */
+int  ui_break_pending(void);
+void ui_break_clear(void);
+
 /* Straight passthrough — see UiHooks.overwrite above. */
 UiOverwrite ui_overwrite(int is_dir, const char *name,
                          long src_size, const char *src_date, const char *src_md5,
@@ -103,5 +112,9 @@ void ui_rate_reset(UiRateMeter *m);
  * without an explicit ui_rate_reset()) reseeds instead of computing a
  * bogus negative rate. */
 int ui_rate_sample(UiRateMeter *m, long done);
+
+/* "12.3 KB/s" -- one decimal, because at modem speed whole KB/s mostly
+ * read "0" or "1". Integer math only (no float on a 68000). */
+void ui_format_rate(char *out, size_t outsz, long bps);
 
 #endif /* UI_HOOKS_H */

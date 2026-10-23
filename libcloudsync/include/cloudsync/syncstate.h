@@ -19,6 +19,11 @@
 #include <stddef.h>
 
 #define SYNCSTATE_FILE ".amicloudsync"
+/* A download in progress lands here (same directory as its target) and
+ * only replaces the target once complete -- a broken-off transfer must
+ * never leave a half file where the next sync would see a local edit
+ * and upload it. Skipped by the local scan at every level. */
+#define SYNC_PART_FILE ".amicloudsync.part"
 
 typedef struct {
     char *path;        /* relative to the sync root, '/'-joined, malloc'd */

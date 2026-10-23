@@ -219,6 +219,7 @@ static void index_local_tree_sync(const char *local_root, const char *rel_prefix
         if (!rel_prefix[0] && (strcmp(e.name, SYNCSTATE_FILE) == 0 ||
                               strcmp(e.name, SYNCSTATE_FILE ".tmp") == 0))
             continue;
+        if (strcmp(e.name, SYNC_PART_FILE) == 0) continue; /* leftover of an aborted run */
 
         md5hex[0] = '\0';
         if (!e.is_dir) {
@@ -691,8 +692,17 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
                 if (verbose) ui_notify(UI_INFO, "(waere heruntergeladen)   %s <- %s", act->lpath, act->rpath);
                 out->downloaded++;
             } else {
+                char part[AC_MAX_PATH];
+                int got;
                 progress_prefix(pr, act->size);
-                if (t->get(t, act->rpath, act->lpath) == 0) {
+                localfs_sibling(part, sizeof(part), act->lpath, SYNC_PART_FILE);
+                got = (t->get(t, act->rpath, part, act->lpath) == 0);
+                if (got && !localfs_replace(part, act->lpath)) {
+                    ac_log_printf("sync: cannot replace %s\n", act->lpath);
+                    got = 0;
+                }
+                if (!got) remove(part);
+                if (got) {
                     localfs_utime(act->lpath, act->mtime);
                     out->downloaded++;
                     /* Pass 1 may have left this path's baseline md5 empty
@@ -859,9 +869,10 @@ static int amicloud_list(SyncTransport *t, const char *remote_path,
     return 1;
 }
 
-static int amicloud_get(SyncTransport *t, const char *remote_path, const char *local_path)
+static int amicloud_get(SyncTransport *t, const char *remote_path, const char *local_path,
+                        const char *display_name)
 {
-    return cmd_get(t->cfg, remote_path, local_path);
+    return cmd_get_named(t->cfg, remote_path, local_path, display_name);
 }
 
 /* Two internal requests, exactly like the pre-refactor code: setdate's

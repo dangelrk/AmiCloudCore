@@ -28,6 +28,9 @@
 static void make_auth(char *out, size_t outsz, const AcConfig *cfg)
 {
     snprintf(out, outsz, "%s:%s", cfg->username, cfg->password);
+    /* Every request builds its credentials here first -- the one spot
+     * that sees the config right before talking to the server. */
+    http_set_timeout(cfg->timeout);
 }
 
 /* "Nur Hauptserver" (repo plan): cfg->server is now allowed to be just
@@ -397,7 +400,8 @@ static int webdav_list(SyncTransport *t, const char *remote_path,
     return ok;
 }
 
-static int webdav_get(SyncTransport *t, const char *remote_path, const char *local_path)
+static int webdav_get(SyncTransport *t, const char *remote_path, const char *local_path,
+                      const char *display_name)
 {
     char url[AC_MAX_URL], auth[192];
     FILE *fp;
@@ -409,11 +413,12 @@ static int webdav_get(SyncTransport *t, const char *remote_path, const char *loc
     fp = fopen(local_path, "wb");
     if (!fp) return 1;
 
-    resp = http_download(url, auth, fp, t->cfg->verify_ssl, NULL, local_path);
+    resp = http_download(url, auth, fp, t->cfg->verify_ssl, NULL,
+                         display_name ? display_name : local_path);
     fclose(fp);
 
     if (!resp || resp->status_code == 0) {
-        if (resp && resp->aborted) remove(local_path);
+        remove(local_path); /* cancelled or broken off -- never keep a partial file */
         http_response_free(resp);
         return 1;
     }

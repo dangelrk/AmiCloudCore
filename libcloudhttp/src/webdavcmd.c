@@ -39,6 +39,9 @@ int webdavcmd_last_status(void)
 static void make_auth(char *out, size_t outsz, const AcConfig *cfg)
 {
     snprintf(out, outsz, "%s:%s", cfg->username, cfg->password);
+    /* Every request builds its credentials here first -- the one spot
+     * that sees the config right before talking to the server. */
+    http_set_timeout(cfg->timeout);
 }
 
 /* Same "bare host or full /remote.php/... collection URL" derivation as

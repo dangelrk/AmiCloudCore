@@ -40,6 +40,8 @@ int config_load(const char *filepath, AcConfig *cfg)
     cfg->debug[0]    = '\0';
     cfg->gmt_offset  = 0;
     cfg->dst         = 0;
+    cfg->timeout     = 0;
+    cfg->cache_ttl   = 0;
 
     fp = fopen(filepath, "r");
     if (!fp) return 0;
@@ -62,6 +64,8 @@ int config_load(const char *filepath, AcConfig *cfg)
         else if (strcmp(key, "debug")    == 0) strncpy(cfg->debug,    val, sizeof(cfg->debug)    - 1);
         else if (strcmp(key, "gmt_offset") == 0) cfg->gmt_offset = atoi(val);
         else if (strcmp(key, "dst")       == 0) cfg->dst        = atoi(val);
+        else if (strcmp(key, "timeout")   == 0) cfg->timeout    = atoi(val);
+        else if (strcmp(key, "cache_ttl") == 0) cfg->cache_ttl  = atoi(val);
     }
     fclose(fp);
     return 1;
@@ -112,6 +116,12 @@ int config_save(const char *filepath, const AcConfig *cfg, unsigned flags)
         fprintf(fp, "basepath=%s\n", cfg->basepath);
     if ((flags & CONFIG_SAVE_DEBUG) && cfg->debug[0])
         fprintf(fp, "debug=%s\n",    cfg->debug);
+    /* No Prefs editor has fields for these (yet) -- but hand-set values
+     * must survive a save from one. */
+    if (cfg->timeout > 0)
+        fprintf(fp, "timeout=%d\n", cfg->timeout);
+    if (cfg->cache_ttl > 0)
+        fprintf(fp, "cache_ttl=%d\n", cfg->cache_ttl);
     if (flags & CONFIG_SAVE_TZ) {
         fprintf(fp, "gmt_offset=%d\n", cfg->gmt_offset);
         fprintf(fp, "dst=%d\n",        cfg->dst);

@@ -23,10 +23,9 @@ typedef struct {
      * generic header store — this is the only header the client needs. */
     char  md5_header[40];
     /* 1 if the transfer was cancelled via the progress hook returning 0
-     * (GUI-Commander-plan section 5.2) — distinct from a genuine network
-     * failure so callers can clean up (delete the partial file) without
-     * changing behaviour for real errors. Always 0 with the default
-     * console progress hook, which never cancels. */
+     * (GUI-Commander-plan section 5.2) or by Ctrl-C (Amiga) — distinct
+     * from a genuine network failure so callers can clean up (delete the
+     * partial file) without changing behaviour for real errors. */
     int   aborted;
 } HttpResponse;
 
@@ -41,7 +40,9 @@ typedef struct {
  * verify_ssl  : 1 = verify certificate (default), 0 = skip (dev only)
  *
  * Returns allocated HttpResponse; caller must call http_response_free().
- * Returns NULL on fatal network error.
+ * Returns NULL on fatal network error. status_code 0 in a returned
+ * response means the transfer broke off part-way (the body is
+ * incomplete and must not be used) -- also a network error.
  */
 HttpResponse *http_request(const char    *method,
                            const char    *url,
@@ -128,6 +129,15 @@ HttpResponse *http_upload_hdr(const char *method,
                               const char *display_name);
 
 void http_response_free(HttpResponse *r);
+
+/* Network idle timeout in seconds: a connect, TLS handshake, send or
+ * receive that makes no progress at all for this long fails. It is
+ * never a limit on a whole transfer -- a large file over a modem may
+ * take as long as it needs as long as data keeps moving. Set from the
+ * config's timeout= key (cmd.c/webdavcmd.c do that per request);
+ * secs <= 0 restores the default. */
+#define AC_HTTP_DEFAULT_TIMEOUT 120
+void http_set_timeout(int secs);
 
 /* Platform init/cleanup (no-op on Unix; WSAStartup/WSACleanup on Windows) */
 int  http_init(void);

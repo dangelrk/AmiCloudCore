@@ -81,7 +81,11 @@ typedef struct SyncTransport {
     int (*list)(struct SyncTransport *t, const char *remote_path,
                 SyncRemoteEntry **out, int *out_n);
 
-    int (*get)(struct SyncTransport *t, const char *remote_path, const char *local_path);
+    /* Downloads remote_path into local_path; display_name is what the
+     * progress line and messages call it (sync downloads into a
+     * temporary file, see SYNC_PART_FILE). 0 on success. */
+    int (*get)(struct SyncTransport *t, const char *remote_path, const char *local_path,
+               const char *display_name);
 
     /* Uploads local_path to remote_path and sets its remote mtime to
      * mtime, as one logical operation (the AmiCloud backend still does

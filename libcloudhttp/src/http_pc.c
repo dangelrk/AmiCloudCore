@@ -163,6 +163,15 @@ static char *make_auth_header(const char *auth)
 /* point (see curl_easy_reset(3)). */
 static CURL *g_curl = NULL;
 
+/* See http.h; same meaning as in http_amiga.c. */
+static int g_timeout = AC_HTTP_DEFAULT_TIMEOUT;
+#define CONNECT_TIMEOUT_MAX 60
+
+void http_set_timeout(int secs)
+{
+    g_timeout = secs > 0 ? secs : AC_HTTP_DEFAULT_TIMEOUT;
+}
+
 static CURL *curl_setup(const char *url, const char *auth,
                         int verify_ssl, struct curl_slist **hdrs_out)
 {
@@ -186,7 +195,15 @@ static CURL *curl_setup(const char *url, const char *auth,
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, (long)verify_ssl);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,        60L);
+    /* Idle timeouts only, never a limit on the whole transfer (that
+     * used to be CURLOPT_TIMEOUT 60 -- every transfer longer than a
+     * minute failed regardless of progress): the connect phase gets at
+     * most CONNECT_TIMEOUT_MAX, after that the transfer only fails if
+     * less than 1 byte/s moved for g_timeout seconds. */
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,
+                     (long)(g_timeout < CONNECT_TIMEOUT_MAX ? g_timeout : CONNECT_TIMEOUT_MAX));
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME,  (long)g_timeout);
 
     *hdrs_out = hdrs;
     return curl;
