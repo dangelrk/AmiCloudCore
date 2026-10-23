@@ -75,13 +75,15 @@ int  ui_confirm(const char *fmt, ...);
 /* Straight passthrough, no formatting needed for a byte count. */
 int  ui_progress(long done, long total, const char *name);
 
-/* Ctrl-C (Amiga break signal). The HTTP layer stops waiting when it
- * arrives and leaves it set, so a loop over many files (get -r, sync)
- * ends instead of starting the next transfer; ui_break_pending() lets
- * any loop check it. Interactive programs call ui_break_clear() before
- * each new command (shell prompt, GUI action). Always 0 / no-op on PC,
- * where Ctrl-C simply ends the program. */
+/* Ctrl-C (Amiga break signal), latched: ui_break_pending() takes the
+ * signal and remembers it until ui_break_clear(), so a loop over many
+ * files (get -r, sync) ends instead of starting the next transfer, and
+ * the HTTP layer stops waiting (it calls ui_break_set() when its
+ * WaitSelect() got the signal). Interactive programs call
+ * ui_break_clear() before each new command (shell prompt, GUI action).
+ * On PC Ctrl-C simply ends the program, so this stays 0 there. */
 int  ui_break_pending(void);
+void ui_break_set(void);
 void ui_break_clear(void);
 
 /* Straight passthrough — see UiHooks.overwrite above. */

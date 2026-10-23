@@ -16,17 +16,28 @@
 #include <proto/exec.h>
 #endif
 
+/* Latched Ctrl-C, see ui_hooks.h. The signal itself is consumed: left
+ * pending, vbcc's stdio (__chkabort) would end the program on its next
+ * printf -- the shell would quit instead of returning to its prompt and
+ * get would leave its partial file behind. */
+static int g_break = 0;
+
 int ui_break_pending(void)
 {
 #ifdef PLATFORM_AMIGA
-    return (SetSignal(0, 0) & SIGBREAKF_CTRL_C) != 0;
-#else
-    return 0;
+    if (SetSignal(0, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) g_break = 1;
 #endif
+    return g_break;
+}
+
+void ui_break_set(void)
+{
+    g_break = 1;
 }
 
 void ui_break_clear(void)
 {
+    g_break = 0;
 #ifdef PLATFORM_AMIGA
     SetSignal(0, SIGBREAKF_CTRL_C);
 #endif
@@ -121,7 +132,9 @@ static int console_progress(long done, long total, const char *name)
     char rate[24];
 
     if (ui_break_pending()) return 0; /* Ctrl-C: cancel this transfer */
-    if (!name) name = "";
+    /* Unnamed = a small API request (list, info, mkdir ...): no status
+     * line for those, over a slow line they'd print "0K gelesen" each. */
+    if (!name || !*name) return 1;
     if (strcmp(name, g_console_last_name) != 0 || done < g_console_rate.last_bytes) {
         ui_rate_reset(&g_console_rate);
         strncpy(g_console_last_name, name, sizeof(g_console_last_name) - 1);

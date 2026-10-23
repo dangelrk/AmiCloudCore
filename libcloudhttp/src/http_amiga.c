@@ -52,6 +52,8 @@
 #include <proto/exec.h>
 #include <proto/dos.h>        /* Write(), Open(), Close() inline stubs */
 #include <proto/socket.h>     /* bsdsocket.h -> dos/dos.h -> guard fires, clean */
+#include <libraries/bsdsocket.h> /* SBTM_SETVAL/SBTC_BREAKMASK */
+#include <utility/tagitem.h>
 #include <libraries/amisslmaster.h>
 #include <libraries/amissl.h>
 #include <proto/amisslmaster.h>
@@ -303,11 +305,15 @@ static char *make_basic_auth(const char *auth)
 /* The socket stays non-blocking from connect() to close; every TLS     */
 /* call that can't proceed waits here via WaitSelect().                 */
 /*                                                                      */
-/* Ctrl-C: Roadshow's WaitSelect() returns -1 (EINTR) on the task's     */
-/* break signal and leaves the signal set (bsdsocket.doc/WaitSelect).   */
-/* That is reported as IO_ABORT, and because the signal stays set, the  */
-/* next request of a recursive get/put aborts right away as well until  */
-/* the program clears it (ui_break_clear(), e.g. the shell's prompt).   */
+/* Ctrl-C: http_init() switches off bsdsocket's own break handling     */
+/* (SBTC_BREAKMASK 0) and wait_sock() passes SIGBREAKF_CTRL_C as a user */
+/* signal instead, so WaitSelect() reliably returns with it in the mask */
+/* -- whether the stack leaves the break signal set after an EINTR      */
+/* differs (Amiberry's bsdsocket emulation clears it; a Break then      */
+/* looked like a timeout and the download simply resumed). It is        */
+/* latched via ui_break_set(), so the next request of a recursive       */
+/* get/put aborts right away as well until the program clears it        */
+/* (ui_break_clear(), e.g. the shell's prompt).                         */
 /* ------------------------------------------------------------------ */
 static int g_timeout = AC_HTTP_DEFAULT_TIMEOUT;
 
@@ -332,18 +338,21 @@ static int wait_sock(AC_SOCKET sock, int for_write, int secs)
 {
     fd_set fds;
     struct timeval tv;
+    ULONG sigs = SIGBREAKF_CTRL_C;
     int sel;
 
+    if (ui_break_pending()) return IO_ABORT;
     FD_ZERO(&fds);
     FD_SET(sock, &fds);
     tv.tv_secs  = secs;
     tv.tv_micro = 0;
     /* (void*) cast: Roadshow-struct timeval vs exec/types.h — gleiche Binaerlayout auf 68k */
     sel = WaitSelect(sock + 1, for_write ? NULL : &fds, for_write ? &fds : NULL,
-                     NULL, (void *)&tv, NULL);
+                     NULL, (void *)&tv, &sigs);
     if (sel > 0) return IO_DONE;
-    if (ui_break_pending()) {
+    if ((sel == 0 && (sigs & SIGBREAKF_CTRL_C)) || ui_break_pending()) {
         HLOG("io: break signal\n");
+        ui_break_set(); /* latched, see above */
         return IO_ABORT;
     }
     return IO_TIMEOUT;
@@ -648,12 +657,17 @@ typedef struct {
     AC_SOCKET   sock;
     char       *buf;
     size_t      size;
+    size_t      cap;            /* allocated bytes at buf (>= size + 1) */
     size_t      header_len;     /* 0 until the header block is complete */
     int         status;
     long        total_body;     /* Content-Length, -1 if none */
     int         chunked;
     int         conn_close;
     long        keepalive;      /* "Keep-Alive: timeout=N", 0 if absent */
+    long        expected;       /* body length for progress: Content-Length,
+                                 * else X-AmiCloud-Length (survives a proxy
+                                 * that turns the body into chunks), -1 */
+    size_t      dec_end;        /* chunked: end of the decoded part in buf */
     /* Body sink: a 2xx body goes straight to fp (and md5) as it arrives
      * instead of piling up in RAM -- an 8 MB Amiga can't hold a large
      * download twice. Other statuses (error JSON) stay in buf. */
@@ -687,6 +701,29 @@ static int flush_body(ReadCtx *c)
     return IO_DONE;
 }
 
+/* Makes room for need bytes. Grows geometrically: a GET into memory
+ * used to realloc() per 4 KB read, which for an 8 MB file meant some
+ * 2000 reallocations copying gigabytes in total -- minutes on a 68030. */
+static int reserve(ReadCtx *c, size_t need)
+{
+    size_t ncap;
+    char *nb;
+
+    if (need <= c->cap) return 1;
+    ncap = c->cap ? c->cap : 16384;
+    while (ncap < need) ncap *= 2;
+    nb = realloc(c->buf, ncap);
+    if (!nb) {
+        /* Doubling may overshoot what's left; try the exact size. */
+        ncap = need;
+        nb = realloc(c->buf, ncap);
+        if (!nb) { HERR("amicloudcore: out of memory\n"); return 0; }
+    }
+    c->buf = nb;
+    c->cap = ncap;
+    return 1;
+}
+
 /* One SSL_read() (waiting as long as needed, see wait_sock()) appended
  * to c->buf, then a progress report. Returns IO_DONE if >= 1 byte
  * arrived, otherwise the reason it didn't. */
@@ -698,15 +735,13 @@ static int read_more(ReadCtx *c)
         ERR_clear_error();
         n = SSL_read(c->ssl, tmp, READ_CHUNK);
         if (n > 0) {
-            char *nb = realloc(c->buf, c->size + (size_t)n + 1);
             long total;
-            if (!nb) { HERR("amicloudcore: out of memory\n"); return IO_ERROR; }
-            c->buf = nb;
+            if (!reserve(c, c->size + (size_t)n + 1)) return IO_ERROR;
             memcpy(c->buf + c->size, tmp, (size_t)n);
             c->size += (size_t)n;
             c->buf[c->size] = '\0';
             HLOG("read: +%d bytes (total %lu)\n", n, (unsigned long)c->size);
-            total = (c->header_len && c->total_body >= 0) ? c->progress_base + c->total_body : -1;
+            total = (c->header_len && c->expected >= 0) ? c->progress_base + c->expected : -1;
             if (!ui_progress(c->progress_base + body_received(c), total, c->display_name)) {
                 HLOG("read: cancelled by progress hook\n");
                 return IO_ABORT;
@@ -757,10 +792,11 @@ static int read_body_exact(ReadCtx *c)
  * decoded chunk goes to the sink right away and the raw remainder moves
  * back down to the end of the header block. IO_DONE means the 0-length
  * terminator chunk and trailer were consumed (connection reusable). */
-static int read_body_chunked(ReadCtx *c)
+static int chunked_decode(ReadCtx *c)
 {
     size_t cursor = c->header_len; /* unparsed raw wire bytes start here */
-    size_t write  = c->header_len; /* decoded body is compacted down to here */
+
+    c->dec_end = c->header_len;    /* decoded body is compacted down to here */
 
     for (;;) {
         char *eol;
@@ -800,7 +836,7 @@ static int read_body_chunked(ReadCtx *c)
                     if (r == IO_EOF) break;
                     if (r != IO_DONE) return r;
                 }
-                c->size = write;
+                c->size = c->dec_end;
                 c->buf[c->size] = '\0';
                 return flush_body(c);
             }
@@ -810,23 +846,38 @@ static int read_body_chunked(ReadCtx *c)
                 if (r != IO_DONE) return r;
             }
 
-            if (write != cursor) memmove(c->buf + write, c->buf + cursor, (size_t)chunk_size);
-            write  += (size_t)chunk_size;
+            if (c->dec_end != cursor) memmove(c->buf + c->dec_end, c->buf + cursor, (size_t)chunk_size);
+            c->dec_end  += (size_t)chunk_size;
             cursor += (size_t)chunk_size + 2; /* data + its trailing \r\n */
 
             if (c->streaming) {
                 /* Sink the decoded part, keep the undecoded rest. */
                 size_t rest = c->size - cursor;
-                c->size = write;
+                c->size = c->dec_end;
                 r = flush_body(c);
                 if (r != IO_DONE) return r;
                 memmove(c->buf + c->header_len, c->buf + cursor, rest);
                 c->size = c->header_len + rest;
                 cursor = c->header_len;
-                write  = c->header_len;
+                c->dec_end  = c->header_len;
             }
         }
     }
+}
+
+/* On any failure, cut the buffer back to the decoded part: a broken-off
+ * chunked body then counts exactly the bytes that are really there
+ * (body_received()), so a GET can resume from that offset like a
+ * Content-Length one -- many servers send chunked (PHP-FPM behind
+ * Apache, Nextcloud). */
+static int read_body_chunked(ReadCtx *c)
+{
+    int r = chunked_decode(c);
+    if (r != IO_DONE && c->size > c->dec_end) {
+        c->size = c->dec_end;
+        c->buf[c->size] = '\0';
+    }
+    return r;
 }
 
 /* Reads one full HTTP response (headers + framing-appropriate body).
@@ -862,13 +913,24 @@ static int ssl_read_response(ReadCtx *c, int *reusable_out)
             t = strstr(kabuf, "timeout=");
             c->keepalive = t ? atol(t + 8) : 0;
             if (c->chunked) c->total_body = -1;
+            c->expected = c->total_body;
+            if (c->expected < 0) {
+                char lenbuf[32];
+                extract_header(c->buf, c->header_len, "X-AmiCloud-Length:", lenbuf, sizeof(lenbuf));
+                if (lenbuf[0]) c->expected = atol(lenbuf);
+            }
             /* No body by definition (RFC 9110 6.4.1) -- without this a
              * 204 to a DELETE would wait for the server to close. */
             if (c->status == 204 || c->status == 304 || (c->status >= 100 && c->status < 200)) {
                 c->chunked = 0;
                 c->total_body = 0;
+                c->expected = 0;
             }
             c->streaming = (c->fp && c->status >= 200 && c->status < 300);
+            /* Body kept in memory and its length known: one allocation. */
+            if (!c->streaming && c->expected > 0
+                && !reserve(c, c->header_len + (size_t)c->expected + 1))
+                return IO_ERROR;
             HLOG("read: headers complete (%lu bytes), status=%d, Content-Length=%ld, chunked=%d, "
                  "conn_close=%d, keep-alive=%ld\n",
                  (unsigned long)c->header_len, c->status, c->total_body, c->chunked,
@@ -1100,6 +1162,7 @@ static int exchange(const char *method, const char *host, int port, const char *
             free(c->buf);
             c->buf  = NULL;
             c->size = 0;
+            c->cap  = 0;
             tls_close(ssl, sock);
             if (reused && attempt == 0 && nothing && (r == IO_EOF || r == IO_ERROR)) {
                 HLOG("http: reused connection was stale (closed before answering) -- retrying fresh\n");
@@ -1126,8 +1189,8 @@ static int exchange(const char *method, const char *host, int port, const char *
 /* A GET whose body breaks off (timeout, reset) is resumed with a Range */
 /* request from where it stopped, up to MAX_RESUMES times as long as   */
 /* each try made progress -- instead of failing a 95 % finished modem   */
-/* download outright. Only for plain Content-Length bodies (byte ranges */
-/* are meaningless for a chunked one) and only if the server answers   */
+/* download outright. Works for chunked bodies too (only fully decoded */
+/* bytes count, see read_body_chunked()) and only if the server answers*/
 /* 206; the AmiCloud server and every WebDAV server do. The MD5 header */
 /* of the first response still covers the whole file, and the streamed*/
 /* MD5 context simply continues, so callers verify exactly as before.  */
@@ -1216,17 +1279,27 @@ static HttpResponse *do_request(const char *method, const char *url,
         if (!c.streaming && c.size > c.header_len) {
             /* Kept in memory (no fp, or a non-2xx answer): append. */
             long n = (long)(c.size - c.header_len);
-            char *nb = realloc(body, (size_t)(body_len + n + 1));
-            if (!nb) {
-                HERR("amicloudcore: out of memory\n");
-                free(c.buf);
-                resp->status_code = 0;
-                break;
+            if (!body) {
+                /* First part: take over the read buffer instead of a
+                 * second full-size copy. */
+                memmove(c.buf, c.buf + c.header_len, (size_t)n);
+                c.buf[n] = '\0';
+                body = c.buf;
+                body_len = n;
+                c.buf = NULL;
+            } else {
+                char *nb = realloc(body, (size_t)(body_len + n + 1));
+                if (!nb) {
+                    HERR("amicloudcore: out of memory\n");
+                    free(c.buf);
+                    resp->status_code = 0;
+                    break;
+                }
+                body = nb;
+                memcpy(body + body_len, c.buf + c.header_len, (size_t)n);
+                body_len += n;
+                body[body_len] = '\0';
             }
-            body = nb;
-            memcpy(body + body_len, c.buf + c.header_len, (size_t)n);
-            body_len += n;
-            body[body_len] = '\0';
         }
         delivered += got;
         free(c.buf);
@@ -1235,7 +1308,7 @@ static HttpResponse *do_request(const char *method, const char *url,
         if (r == IO_ABORT) { resp->aborted = 1; resp->status_code = 0; break; }
 
         if (can_resume && resp->status_code >= 200 && resp->status_code < 300
-            && !c.chunked && c.total_body > 0 && got > 0 && resumes < MAX_RESUMES) {
+            && got > 0 && resumes < MAX_RESUMES) {
             HERR("amicloudcore: connection to %s lost (%s) after %ld bytes -- resuming\n",
                  host, io_text(r), delivered);
             continue;
@@ -1329,6 +1402,15 @@ int http_init(void)
         return 0;
     }
     HLOG("http_init: bsdsocket.library OK\n");
+    {
+        /* Ctrl-C is handled by wait_sock() itself, see there. */
+        struct TagItem tags[2];
+        tags[0].ti_Tag  = SBTM_SETVAL(SBTC_BREAKMASK);
+        tags[0].ti_Data = 0;
+        tags[1].ti_Tag  = TAG_DONE;
+        tags[1].ti_Data = 0;
+        SocketBaseTagList(tags);
+    }
 
     HLOG("http_init: opening amisslmaster.library\n");
     AmiSSLMasterBase = OpenLibrary("amisslmaster.library", AMISSLMASTER_MIN_VERSION);
