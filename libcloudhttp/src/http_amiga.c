@@ -1212,7 +1212,10 @@ static HttpResponse *do_request(const char *method, const char *url,
     int  port;
     long upload_fp_start = upload_fp ? ftell(upload_fp) : 0;
     const char *extra = (extra_headers && *extra_headers) ? extra_headers : "";
-    int  can_resume = (strcmp(method, "GET") == 0 && !upload_data && !upload_fp);
+    /* A caller's own Range header (a ranged read) is never resumed with a
+     * second one. */
+    int  can_resume = (strcmp(method, "GET") == 0 && !upload_data && !upload_fp
+                       && !strstr(extra, "Range:"));
     char *auth_val;
     HttpResponse *resp;
     char *body = NULL;      /* in-memory body, collected across resumed parts */

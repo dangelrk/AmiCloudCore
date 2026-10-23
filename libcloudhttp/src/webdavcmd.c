@@ -457,6 +457,57 @@ int webdavcmd_get_buf(const AcConfig *cfg, const char *remote_path, char **out, 
     return 0;
 }
 
+int webdavcmd_get_range(const AcConfig *cfg, const char *remote_path, long offset, long len,
+                        char **out, long *out_len, int *status_out)
+{
+    char url[AC_MAX_URL], auth[192], hdr[64];
+    HttpResponse *resp;
+    const char *src = NULL;
+    long n = 0;
+    char *buf;
+
+    *out = NULL; *out_len = 0;
+    if (status_out) *status_out = 0;
+    if (len <= 0) return 1;
+
+    build_url(url, sizeof(url), cfg, remote_path);
+    make_auth(auth, sizeof(auth), cfg);
+    snprintf(hdr, sizeof(hdr), "Range: bytes=%ld-%ld\r\n", offset, offset + len - 1);
+
+    resp = http_request_hdr("GET", url, auth, hdr, NULL, 0, cfg->verify_ssl);
+    g_last_status = resp ? resp->status_code : 0;
+    if (!resp || resp->status_code == 0) { http_response_free(resp); return 1; }
+    if (status_out) *status_out = resp->status_code;
+    if (resp->status_code == 206) {
+        src = resp->body;
+        n = resp->body_len;
+    } else if (resp->status_code == 200) {
+        /* Server ignored Range: cut our part out of the whole file. */
+        if (offset < resp->body_len) {
+            src = resp->body + offset;
+            n = resp->body_len - offset;
+        }
+    } else if (resp->status_code == 416) {
+        n = 0; /* starts at or past the end: nothing to read */
+    } else {
+        http_response_free(resp);
+        return 1;
+    }
+    if (n > len) n = len;
+    if (n < 0) n = 0;
+#ifdef PLATFORM_AMIGA
+    buf = (char *)AllocVec((ULONG)(n > 0 ? n : 1), MEMF_PUBLIC);
+#else
+    buf = (char *)malloc((size_t)(n > 0 ? n : 1));
+#endif
+    if (!buf) { http_response_free(resp); return 1; }
+    if (n > 0) memcpy(buf, src, (size_t)n);
+    *out = buf;
+    *out_len = n;
+    http_response_free(resp);
+    return 0;
+}
+
 int webdavcmd_put_buf(const AcConfig *cfg, const char *remote_path, const char *buf, long len, int *status_out)
 {
     char url[AC_MAX_URL], auth[192];

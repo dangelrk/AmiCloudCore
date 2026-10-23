@@ -149,6 +149,15 @@ int cmd_get_buf(const AcConfig *cfg, const char *remote_path, char **out, long *
  * cmd_get_buf(). Returns 0 on success. */
 int cmd_put_buf(const AcConfig *cfg, const char *remote_path, const char *buf, long len, int *status_out);
 
+/* Downloads only bytes offset..offset+len-1 of remote_path (fewer at the
+ * end of the file, none past it) into *out -- same allocation and
+ * status_out contract as cmd_get_buf(), no MD5 check (the server's
+ * checksum covers whole files only). For the CLOUD: handler's reads:
+ * opening a file must not pull all of it over the line just because
+ * Workbench wants a few bytes to pick an icon. Returns 0 on success. */
+int cmd_get_range(const AcConfig *cfg, const char *remote_path, long offset, long len,
+                  char **out, long *out_len, int *status_out);
+
 /* Recursive delete: tries the server-side action=delete&recursive=1
  * first, falls back to a client-side walk if the server doesn't support
  * it (older deployment, signalled by a 409 there). */

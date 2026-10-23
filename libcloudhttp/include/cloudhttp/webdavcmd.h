@@ -66,6 +66,13 @@ int webdavcmd_get_buf(const AcConfig *cfg, const char *remote_path, char **out, 
  * status_out: see webdavcmd_get_buf(). Returns 0 on success. */
 int webdavcmd_put_buf(const AcConfig *cfg, const char *remote_path, const char *buf, long len, int *status_out);
 
+/* Downloads only bytes offset..offset+len-1 via a Range request (fewer
+ * at the end of the file, none past it) -- cmd_get_range()'s contract.
+ * A server ignoring Range (200 with the whole file) is handled by
+ * slicing. Returns 0 on success. */
+int webdavcmd_get_range(const AcConfig *cfg, const char *remote_path, long offset, long len,
+                        char **out, long *out_len, int *status_out);
+
 /* DELETE; 404 (already gone) counts as success, matching cmd_del(). */
 int webdavcmd_del(const AcConfig *cfg, const char *remote_path);
 

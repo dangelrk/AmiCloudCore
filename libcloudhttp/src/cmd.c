@@ -1349,6 +1349,42 @@ int cmd_get_buf(const AcConfig *cfg, const char *remote_path, char **out, long *
     return 0;
 }
 
+int cmd_get_range(const AcConfig *cfg, const char *remote_path, long offset, long len,
+                  char **out, long *out_len, int *status_out)
+{
+    char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH];
+    HttpResponse *resp;
+    long n;
+    char *buf;
+
+    *out = NULL; *out_len = 0;
+    if (status_out) *status_out = 0;
+
+    make_auth(auth, sizeof(auth), cfg);
+    full_path(rpath, sizeof(rpath), cfg, remote_path);
+    build_url(url, sizeof(url), cfg, "download", rpath);
+    snprintf(url + strlen(url), sizeof(url) - strlen(url), "&offset=%ld&length=%ld", offset, len);
+
+    resp = http_request("GET", url, auth, NULL, 0, cfg->verify_ssl);
+    g_last_status = resp ? resp->status_code : 0;
+    if (!resp || resp->status_code == 0) { http_response_free(resp); return 1; }
+    if (status_out) *status_out = resp->status_code;
+    if (resp->status_code != 200) { http_response_free(resp); return 1; }
+
+    n = resp->body_len > len ? len : (resp->body_len > 0 ? resp->body_len : 0);
+#ifdef PLATFORM_AMIGA
+    buf = (char *)AllocVec((ULONG)(n > 0 ? n : 1), MEMF_PUBLIC);
+#else
+    buf = (char *)malloc((size_t)(n > 0 ? n : 1));
+#endif
+    if (!buf) { http_response_free(resp); return 1; }
+    if (n > 0) memcpy(buf, resp->body, (size_t)n);
+    *out = buf;
+    *out_len = n;
+    http_response_free(resp);
+    return 0;
+}
+
 int cmd_put_buf(const AcConfig *cfg, const char *remote_path, const char *buf, long len, int *status_out)
 {
     char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH];
