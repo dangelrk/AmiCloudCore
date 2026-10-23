@@ -20,7 +20,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Same convention as AmiOwnCloud's apps/amicloud-sync-cx/src/gui.c: this
+/* Same convention as AmiOwnCloud's apps/amiowncloud-sync-cx/src/gui.c: this
  * module opens intuition.library/gadtools.library itself (no autoopen),
  * so it owns these globals -- every proto/*.h inline stub for these two
  * libraries calls through them. */

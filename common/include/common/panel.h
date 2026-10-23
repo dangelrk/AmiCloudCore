@@ -20,7 +20,7 @@
  * Handler.md, M5) with the two-way sync engine (panel_sync()/SyncSummary
  * and its helpers) removed — that logic now lives in libcloudsync
  * (libcloudsync/include/cloudsync/sync.h), dormant until a future
- * cloudsync commodity links it. Progress/progress_reset()/progress_prefix()
+ * sync commodity links it. Progress/progress_reset()/progress_prefix()
  * also moved out, to libcloudcore (both this file and libcloudsync need
  * them) — this header just includes cloudcore's progress.h instead of
  * declaring its own copy.

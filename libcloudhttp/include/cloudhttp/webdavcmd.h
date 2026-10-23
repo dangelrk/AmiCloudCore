@@ -8,7 +8,7 @@
 #include "entry.h" /* AcEntry/AcInfo -- shared types are core's job, not this
                     * HTTP layer's (module-encapsulation rule, see cmd.h's
                     * own comment). Returning the exact same structs cmd.c
-                    * does lets owncloud-worker's WREQ_* dispatch stay
+                    * does lets amiowncloud-worker's WREQ_* dispatch stay
                     * byte-for-byte identical to amicloud-worker's, just
                     * calling webdavcmd_*() instead of cmd_*(). */
 #include <stddef.h>
@@ -22,16 +22,16 @@
  * structurally identical.
  *
  * Deliberately independent of libcloudsync/src/webdav.c (the
- * SyncTransport-based WebDAV backend AmiCloudSync/webdavsync use): that
+ * SyncTransport-based WebDAV backend AmiOwnCloudSync/amiowncloud-sync use): that
  * backend is file-based (local path in, local path out) and its
  * SyncTransport vtable has no buffer-oriented get/put, which is what a
  * DOS handler's in-RAM-per-open-file model (see owncloudhandler's
  * actions.h OpenFile) needs. Sharing the wire-level primitives
  * (http_request_hdr/http_upload_hdr, already in libcloudhttp/http.h) is
  * enough reuse; duplicating the ~150 lines of PROPFIND-multistatus/
- * RFC1123-date parsing here keeps owncloud-worker's link set to just
+ * RFC1123-date parsing here keeps amiowncloud-worker's link set to just
  * libcloudcore+libcloudhttp (no libcloudsync, matching amicloud-worker's
- * footprint) and keeps libcloudsync/AmiCloudSync completely untouched.
+ * footprint) and keeps libcloudsync/AmiOwnCloudSync completely untouched.
  *
  * Auth: HTTP Basic (cfg->username/password, an app password recommended
  * for Nextcloud). Base URL: cfg->server, either a bare host (derived to

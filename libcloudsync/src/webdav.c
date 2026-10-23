@@ -34,12 +34,12 @@ static void make_auth(char *out, size_t outsz, const AcConfig *cfg)
 }
 
 /* "Nur Hauptserver" (repo plan): cfg->server is now allowed to be just
- * the bare host the AmiCloudSyncPrefs editor asks for, e.g.
+ * the bare host the AmiOwnCloudSyncPrefs editor asks for, e.g.
  * "https://cloud.example.com" -- this derives the actual per-user
  * WebDAV collection root Nextcloud/ownCloud expects,
  * "<host>/remote.php/dav/files/<username>". Full collection URLs
- * already containing "/remote.php/" (old AmiCloudSync.prefs files, and
- * webdavsync's own config -- see webdavsync.cfg.example) are recognised
+ * already containing "/remote.php/" (old AmiOwnCloudSync.prefs files, and
+ * amiowncloud-sync's own config -- see amiowncloud-sync.cfg.example) are recognised
  * and passed through unchanged, so neither format ever breaks.
  *
  * Exported (webdav_derive_base_url(), see webdav.h) rather than kept

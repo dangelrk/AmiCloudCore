@@ -17,14 +17,14 @@
  * cfg->server accepts two shapes, both handled by
  * webdav_derive_base_url() below:
  *   - Bare host, e.g. "https://cloud.example.com" (the "nur
- *     Hauptserver" AmiCloudSyncPrefs editor, see repo plan) -- the
+ *     Hauptserver" AmiOwnCloudSyncPrefs editor, see repo plan) -- the
  *     per-user WebDAV collection root is derived as
  *     "<host>/remote.php/dav/files/<cfg->username>".
  *   - A full WebDAV collection URL, e.g.
  *     "https://cloud.example.com/remote.php/dav/files/USER" (Nextcloud/
  *     ownCloud's per-user files root, recognised by containing
  *     "/remote.php/") -- used verbatim, for backward compatibility with
- *     existing AmiCloudSync.prefs files and webdavsync's own config.
+ *     existing AmiOwnCloudSync.prefs files and amiowncloud-sync's own config.
  * Neither shape is ever an api.php endpoint.
  * cfg->username/password are sent as HTTP Basic auth (Nextcloud: use an
  * app password, not the account login password). cfg->basepath is

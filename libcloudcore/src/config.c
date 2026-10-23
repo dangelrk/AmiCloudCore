@@ -90,7 +90,7 @@ void config_default_path(const char *basename,
     /* No CWD-relative fallback here (unlike this function's own history)
      * -- either it's in $HOME or it's simply not configured yet, same
      * "no third guess" rule the Amiga side settled on for
-     * ENV:/ENVARC:AmiCloudSync.cfg. Matches PLATFORM_WIN's own
+     * ENV:/ENVARC:AmiOwnCloudSync.cfg. Matches PLATFORM_WIN's own
      * no-fallback behaviour above. */
     if (fallback_sz) fallback[0] = '\0';
 #endif
@@ -107,7 +107,7 @@ int config_save(const char *filepath, const AcConfig *cfg, unsigned flags)
 
     /* user=/pass=, not username=/password= -- the spelling every config
      * file/example in this repo already uses (see pairs_save() in
-     * amicloud-sync-cx/src/pairs.c, which this mirrors). */
+     * amiowncloud-sync-cx/src/pairs.c, which this mirrors). */
     fprintf(fp, "server=%s\n",      cfg->server);
     fprintf(fp, "user=%s\n",        cfg->username);
     fprintf(fp, "pass=%s\n",        cfg->password);

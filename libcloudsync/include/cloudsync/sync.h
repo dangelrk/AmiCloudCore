@@ -24,7 +24,7 @@
  * this repo's own AmiCloud server (api.php) entering the picture at
  * all -- see transport.h's own comment for why. cloudsync_run() is now
  * just a one-line wrapper kept for source compatibility with every
- * existing caller (AmiCloud's apps/cloudsync CLI): same signature, same
+ * existing caller (AmiCloud's apps/amicloud-sync CLI): same signature, same
  * behaviour, unchanged.
  */
 
@@ -66,7 +66,7 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
 
 /* Original entry point, unchanged in signature and behaviour -- builds
  * the AmiCloud (api.php, libcloudhttp/cmd.h) transport internally and
- * calls cloudsync_run_t(). Every existing caller (AmiCloud's apps/cloudsync)
+ * calls cloudsync_run_t(). Every existing caller (AmiCloud's apps/amicloud-sync)
  * keeps working exactly as before. */
 void cloudsync_run(const AcConfig *cfg, const char *local_root, const char *remote_root,
                    int dry_run, int verbose, Progress *pr, SyncSummary *out);

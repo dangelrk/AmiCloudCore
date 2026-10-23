@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Ronny Krueger
 # libcloudsync — two-way local<->cloud folder sync engine (cloudsync_run,
-# ex-panel_sync). Linked by AmiCloud's apps/cloudsync one-shot CLI (roadmap
+# ex-panel_sync). Linked by AmiCloud's apps/amicloud-sync one-shot CLI (roadmap
 # phase 5's future sync commodity would wrap that in a background daemon).
 #
 # Build:   make -f Makefile.pc

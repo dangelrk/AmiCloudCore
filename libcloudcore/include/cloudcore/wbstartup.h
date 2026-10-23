@@ -6,14 +6,14 @@
 
 /*
  * wbstartup.h -- Workbench-launch helpers (icon.library tooltypes),
- * factored out of amicloud-commander-mui/amivcs-gui-mui/amicloud-sync-cx,
+ * factored out of amicloud-commander-mui/amivcs-gui-mui/amiowncloud-sync-cx,
  * which each had their own copy of this exact dance (OpenLibrary("icon.
  * library"), CurrentDir/GetDiskObject/FindToolType/FreeDiskObject).
  *
  * PLATFORM_AMIGA-only AND deliberately its own file, never folded into
  * config.c: a CLI program has no business linking icon.library/
  * workbench headers at all. Only Workbench-launchable GUI apps
- * (amicloud-commander-mui, amivcs-gui-mui, amicloud-sync-cx) add
+ * (amicloud-commander-mui, amivcs-gui-mui, amiowncloud-sync-cx) add
  * wbstartup.c to their Makefile's CORE_SRCS -- a plain CLI build simply
  * never compiles this file in, so it stays exactly as WB-independent as
  * it always was.

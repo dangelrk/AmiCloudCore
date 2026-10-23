@@ -8,7 +8,7 @@
 #
 # No oml on the host, so this only builds .o files (into obj/amiga/),
 # no libcloudsync.lib — see libcloudcore/Makefile.amiga-cross for why.
-# AmiCloud's apps/cloudsync/Makefile.amiga-cross compiles these same sources
+# AmiCloud's apps/amicloud-sync/Makefile.amiga-cross compiles these same sources
 # straight into its own obj/amiga/ (prefixed sync_*.o) rather than linking
 # this build's output — this Makefile still exists to verify libcloudsync
 # compiles standalone against the current lib headers.

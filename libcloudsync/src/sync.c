@@ -30,7 +30,7 @@
 /* ac_log_printf() is only declared under PLATFORM_AMIGA in http.h (see
  * cmd.c, which guards every one of its own call sites with #ifdef
  * PLATFORM_AMIGA/#endif) -- but this file also builds for PC/Mac/Linux
- * (cloudsync, webdavsync, amicloud-shell all link it via Makefile.pc).
+ * (cloudsync, amiowncloud-sync, amicloud-shell all link it via Makefile.pc).
  * One local no-op fallback here beats individually #ifdef-guarding every
  * call site below; harmless on non-Amiga since ac_log_printf's only
  * consumer there would be this same no-op. */
@@ -428,7 +428,7 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
         ui_notify(UI_INFO, "Sync: %s <-> %s%s", local_root, remote_root,
                  dry_run ? "  (Probelauf, keine Aenderungen)" : "");
     /* Unconditional (not gated on verbose, which callers like the
-     * AmiCloudSync commodity always pass 0) -- a no-op unless the caller
+     * AmiOwnCloudSync commodity always pass 0) -- a no-op unless the caller
      * wired http_log_bptr/http_log_path from cfg.debug (see
      * ac_log_printf()'s own doc comment), but when it is, this is what
      * ties the per-failure ac_log_printf() calls below to which sync run

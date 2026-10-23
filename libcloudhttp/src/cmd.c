@@ -23,7 +23,7 @@
  * response/transport failure), set right after every http_request()/
  * http_download()/http_upload() call in this file, success or failure.
  * Exposed via cmd_last_status() for callers whose cmd_*() wrapper only
- * returns 0/1 (the CLOUD: handler's worker needs the real status for
+ * returns 0/1 (the AMICLOUD: handler's worker needs the real status for
  * precise DOS error mapping, e.g. telling a 401 apart from a 404). */
 static int g_last_status = 0;
 
@@ -1263,7 +1263,7 @@ int cmd_del_recursive(const AcConfig *cfg, const char *remote_path)
 }
 
 /* ------------------------------------------------------------------ */
-/* get_buf / put_buf (in-memory transfers for the CLOUD: handler's       */
+/* get_buf / put_buf (in-memory transfers for the AMICLOUD: handler's       */
 /* worker process, see AmiCloud docs/design/handler-plan.md Stufe 2)                     */
 /* ------------------------------------------------------------------ */
 int cmd_get_buf(const AcConfig *cfg, const char *remote_path, char **out, long *out_len, int *status_out)

@@ -42,10 +42,10 @@ es gibt, und bindet dann die gemeinsame Logik ein:
 
 ```make
 PROJECT    = AmiCloud
-PC_DIRS    = apps/amicloud apps/amicloud-shell apps/cloudsync
+PC_DIRS    = apps/amicloud apps/amicloud-shell apps/amicloud-sync
 QT_DIRS    = apps/amicloud-commander-qt
 AMIGA_DIRS = apps/amicloud apps/amicloud-commander-mui handler/cloudhandler
-DIST_EXTRA = handler/cloudhandler/mount/CLOUD:Storage/DOSDrivers
+DIST_EXTRA = handler/cloudhandler/mount/AMICLOUD:Storage/DOSDrivers
 
 include core/mk/project.mk
 ```

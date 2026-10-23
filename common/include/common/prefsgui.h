@@ -6,7 +6,7 @@
 
 /*
  * prefsgui.h -- shared GadTools scaffolding for this repo's Prefs
- * editors (amicloud-prefs, amivcs-prefs, amicloudsync-prefs; see the
+ * editors (amicloud-prefs, amivcs-prefs, amiowncloud-sync-prefs; see the
  * repo plan "Drei getrennte Prefs-Programme"). Deliberately independent
  * of cmd.h/http.h/sync.h -- these programs only ever read/write a
  * config file, never talk to a server, so they must not drag that
@@ -15,7 +15,7 @@
  *
  * This is a toolbox, not a form-builder framework: each Prefs program
  * still assembles its own window with CreateContext()/CreateGadget()
- * exactly like AmiOwnCloud's apps/amicloud-sync-cx/src/gui.c and its
+ * exactly like AmiOwnCloud's apps/amiowncloud-sync-cx/src/gui.c and its
  * run_pair_dialog() already do -- this file just factors out the parts
  * that were about to be copied three times verbatim: opening the
  * PubScreen/VisualInfo, laying out one labeled field per row, the
@@ -43,7 +43,7 @@
 /* PubScreen / VisualInfo -- call prefsgui_screen_open() once at         */
 /* startup before building any window, prefsgui_screen_close() once at   */
 /* shutdown (also closes gadtools.library/intuition.library). Mirrors    */
-/* gui_open()'s/gui_close()'s prologue/epilogue in amicloud-sync-cx.      */
+/* gui_open()'s/gui_close()'s prologue/epilogue in amiowncloud-sync-cx.      */
 /* ------------------------------------------------------------------ */
 
 int  prefsgui_screen_open(void);
@@ -113,7 +113,7 @@ struct Gadget *prefsgui_status_line(PrefsLayout *lay, WORD start_x, WORD total_w
 /* ------------------------------------------------------------------ */
 /* Read-back helpers -- GT_GetGadgetAttrs wrappers so callers don't       */
 /* repeat the StringInfo/attribute-tag boilerplate (see                   */
-/* run_pair_dialog() in amicloud-sync-cx/src/gui.c for the pattern this   */
+/* run_pair_dialog() in amiowncloud-sync-cx/src/gui.c for the pattern this   */
 /* replaces).                                                              */
 /* ------------------------------------------------------------------ */
 

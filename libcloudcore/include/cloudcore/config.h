@@ -25,13 +25,13 @@ void config_merge(AcConfig *cfg,
 
 /*
  * config_save() -- the write-side counterpart of config_load(), for the
- * Prefs editors (amicloud-prefs/amivcs-prefs/amicloudsync-prefs, see
+ * Prefs editors (amicloud-prefs/amivcs-prefs/amiowncloud-sync-prefs, see
  * repo plan). Always writes server=/user=/pass=/verify_ssl= (every tool
  * needs those); CONFIG_SAVE_* flags add the optional keys a given tool's
  * config file actually uses, so e.g. amivcs.cfg doesn't grow a stray
  * basepath= line no amivcs code ever reads.
  *
- * Atomic like pairs_save() (AmiOwnCloud's apps/amicloud-sync-cx/src/pairs.c):
+ * Atomic like pairs_save() (AmiOwnCloud's apps/amiowncloud-sync-cx/src/pairs.c):
  * writes "<filepath>.tmp" then rename()s it over filepath, so a crash or
  * a full ENVARC: mid-write never leaves a half-written config behind.
  * Returns 1 on success, 0 on any I/O failure (tmp file couldn't be
@@ -50,7 +50,7 @@ void config_usage(const char *progname);
 /*
  * Fills primary/fallback with this platform's conventional config-file
  * search path for a program config named `basename` (e.g. "amicloud",
- * "webdavsync") -- the exact ENV:/PROGDIR:/~/.<basename>rc cascade every
+ * "amiowncloud-sync") -- the exact ENV:/PROGDIR:/~/.<basename>rc cascade every
  * CLI and GUI app in this repo already needs, previously copied ad hoc
  * into each one's own main() as DEFAULT_CFG/FALLBACK_CFG macros:
  *   Amiga : primary "ENV:<basename>.cfg", fallback "<basename>.cfg"

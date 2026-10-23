@@ -128,7 +128,7 @@ int cmd_mkdir_quiet(const AcConfig *cfg, const char *remote_path);
 int cmd_setdate_mtime(const AcConfig *cfg, const char *remote_path, long mtime_epoch);
 
 /* ------------------------------------------------------------------ */
-/* In-memory transfer helpers for the CLOUD: handler's worker process   */
+/* In-memory transfer helpers for the AMICLOUD: handler's worker process   */
 /* (AmiCloud docs/design/handler-plan.md Stufe 2) -- the worker already needs the whole */
 /* file in RAM either way (Stage 2's design has no streaming/partial    */
 /* reads), so these skip cmd_get()/cmd_put()'s local-file round trip.   */
@@ -152,7 +152,7 @@ int cmd_put_buf(const AcConfig *cfg, const char *remote_path, const char *buf, l
 /* Downloads only bytes offset..offset+len-1 of remote_path (fewer at the
  * end of the file, none past it) into *out -- same allocation and
  * status_out contract as cmd_get_buf(), no MD5 check (the server's
- * checksum covers whole files only). For the CLOUD: handler's reads:
+ * checksum covers whole files only). For the AMICLOUD: handler's reads:
  * opening a file must not pull all of it over the line just because
  * Workbench wants a few bytes to pick an icon. Returns 0 on success. */
 int cmd_get_range(const AcConfig *cfg, const char *remote_path, long offset, long len,
@@ -171,7 +171,7 @@ void cmd_resolve_path(const AcConfig *cfg, const char *path, char *out, size_t o
 /* Raw HTTP status of the most recently completed request (0 = no
  * response/transport failure). Every cmd_*() function in this module
  * updates it before returning, on success and on failure alike -- for
- * callers whose wrapper only returns 0/1 (e.g. the CLOUD: handler's
+ * callers whose wrapper only returns 0/1 (e.g. the AMICLOUD: handler's
  * worker, worker.c) but still needs the real status for precise error
  * mapping, call this right after such a cmd_*() call returns. */
 int cmd_last_status(void);
