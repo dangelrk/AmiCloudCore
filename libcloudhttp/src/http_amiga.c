@@ -1054,7 +1054,7 @@ static int exchange(const char *method, const char *host, int port, const char *
         int       reused = 0;
         int       reusable = 0;
         int       r;
-        char      req_head[2048];
+        char      req_head[AC_MAX_URL + 1024]; /* path up to AC_MAX_URL + headers */
         char      range[48];
         long      body_len;
         int       req_len;
