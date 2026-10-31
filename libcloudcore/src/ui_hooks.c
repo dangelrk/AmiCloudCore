@@ -121,9 +121,9 @@ static int console_confirm(const char *msg)
 {
     char prompt[1100], line[16];
     console_progress_close_line();
-    snprintf(prompt, sizeof(prompt), "%s [y/N] ", msg);
+    snprintf(prompt, sizeof(prompt), "%s [j/N] ", msg);
     if (g_read_line(prompt, line, sizeof(line)) < 0) return 0;
-    return (line[0] == 'y' || line[0] == 'Y');
+    return (line[0] == 'y' || line[0] == 'Y' || line[0] == 'j' || line[0] == 'J');
 }
 
 static int console_progress(long done, long total, const char *name)
