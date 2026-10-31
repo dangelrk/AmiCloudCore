@@ -33,6 +33,9 @@ typedef struct {
     /* 1 if the run stopped early: scan error, out of memory (nothing was
      * changed) or a break (the rest follows with the next run). */
     int aborted;
+    /* remote names skipped because they are too long for the local file
+     * system (S15) */
+    int skipped;
 } SyncSummary;
 
 /* Options of one run. Initialise with sync_options_init() and change
@@ -48,6 +51,9 @@ typedef struct {
      * server, user and remote root the kernel takes from the transport
      * (S3); e.g. the local codeset. NULL = none. */
     const char *identity_extra;
+    /* Longest local file name in bytes; 0 = ask libcloudfs
+     * (localfs_name_max(), S15). Longer remote names are skipped. */
+    int name_max;
 } SyncOptions;
 
 void sync_options_init(SyncOptions *o);

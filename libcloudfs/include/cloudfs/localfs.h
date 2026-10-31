@@ -83,6 +83,10 @@ void localfs_sibling(char *out, size_t sz, const char *path, const char *name);
  * must be on the same volume. Returns 1 on success. */
 int localfs_replace(const char *src, const char *dst);
 
+/* Longest file name (bytes) the file system of dir really keeps: probed
+ * on AmigaOS (classic FFS truncates silently to 30), 255 elsewhere. */
+int localfs_name_max(const char *dir);
+
 /* 1 if names in dir are case-sensitive (probe file, see localfs_util.c),
  * 0 if not or if the probe fails. */
 int localfs_case_sensitive(const char *dir);

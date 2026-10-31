@@ -62,6 +62,50 @@ void localfs_sibling(char *out, size_t sz, const char *path, const char *name)
     snprintf(out, sz, "%.*s%s", (int)(cut - path + 1), path, name);
 }
 
+/* Longest file name dir accepts (bytes). AmigaOS: classic FFS silently
+ * truncates longer names to 30 -- when creating AND when opening, so two
+ * long names with the same first 30 characters end up in one file -- and
+ * the DiskType does not tell (RAM: says DOS\0 but takes long names). So:
+ * create a file with a 120-character name and read back how long its name
+ * really became. Elsewhere 255. A failed probe gives the safe 30. */
+int localfs_name_max(const char *dir)
+{
+#ifdef PLATFORM_AMIGA
+    static const char prefix[] = ".amicloudsync.namelen";
+    char name[121], path[AC_MAX_PATH];
+    LocalDir *d;
+    LocalDirEntry e;
+    FILE *fp;
+    int got = 0;
+    size_t i;
+
+    strcpy(name, prefix);
+    for (i = strlen(prefix); i < 120; i++) name[i] = (char)('a' + i % 26);
+    name[120] = '\0';
+    localfs_join(path, sizeof(path), dir, name);
+    fp = fopen(path, "wb");
+    if (!fp) return 30;
+    fclose(fp);
+    d = localfs_opendir(dir);
+    if (d) {
+        while (localfs_readdir(d, &e)) {
+            if (strncmp(e.name, prefix, sizeof(prefix) - 1) == 0) {
+                got = (int)strlen(e.name);
+                localfs_join(path, sizeof(path), dir, e.name);
+                break;
+            }
+        }
+        localfs_closedir(d);
+    }
+    remove(path);
+    if (got <= 0) return 30;
+    return got < 120 ? got : 255;
+#else
+    (void)dir;
+    return 255;
+#endif
+}
+
 /* Probe: create a file with a lower-case name and look for it under the
  * upper-case one. Any failure counts as case-insensitive, the safe
  * assumption for sync (AmigaOS, macOS by default and Windows are). */

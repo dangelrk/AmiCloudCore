@@ -15,7 +15,7 @@
 VBCC    ?= /opt/vbcc
 CC       = $(VBCC)/bin/vc
 TARGET   = +aos68k
-CPU      = 68000
+CPU      = 68020
 
 RUNTIME_INC = $(VBCC)/targets/m68k-amigaos/include
 NDK_INC     = $(VBCC)/sdk/NDK_3.2/Include_H

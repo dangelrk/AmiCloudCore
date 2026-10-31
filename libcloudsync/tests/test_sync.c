@@ -70,6 +70,7 @@ typedef struct {
 } Env;
 
 static char g_tmproot[512];
+static int  g_name_max;   /* SyncOptions.name_max for the next runs, 0 = probe */
 static int  g_envno;
 
 static void rm_rf(const char *path)
@@ -196,6 +197,7 @@ static void run_root(Env *e, const char *remote_root, int dry)
         sync_options_init(&o);
         o.dry_run = dry;
         o.verbose = 1;
+        o.name_max = g_name_max;
         cloudsync_run_ex(&e->f.t, e->local, remote_root, &o, &pr, &e->s);
     }
     fflush(stdout);
@@ -1235,6 +1237,30 @@ static void t_checkpoint(void)
     env_free(&e);
 }
 
+/* S15: on a file system with 30-character names a longer server name is
+ * skipped with everything below it; nothing is uploaded under a short
+ * name, nothing deleted on the server */
+static void t_long_names(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    g_name_max = 30;
+    fake_put_data(&e.f, rp(&e, "A23456789012345678901234567890"), "thirty", T0);
+    fake_put_data(&e.f, rp(&e, "B234567890123456789012345678901"), "thirty-one", T0);
+    fake_put_data(&e.f, rp(&e, "LongDirectoryName_123456789012345/in.txt"), "inside", T0);
+    run(&e);
+    CHECK_EQ(e.s.downloaded, 1);
+    CHECK_EQ(e.s.skipped, 2);
+    CHECK_EQ(e.s.conflicts, 0);
+    CHECK(lhas(&e, "A23456789012345678901234567890", "thirty"));
+    run(&e);
+    run(&e);
+    CHECK_EQ(e.f.calls[FOP_PUT] + e.f.calls[FOP_DEL], 0);
+    CHECK(fake_has(&e.f, rp(&e, "B234567890123456789012345678901"), "thirty-one"));
+    CHECK(fake_has(&e.f, rp(&e, "LongDirectoryName_123456789012345/in.txt"), "inside"));
+    g_name_max = 0;
+    env_free(&e);
+}
+
 /* a larger tree: first sync, then an idle run (was O(n^2) before S12) */
 static void t_many_files(void)
 {
@@ -1297,6 +1323,7 @@ static const Test tests[] = {
     { "S12: Stand bleibt sortiert",                  t_syncstate_sorted, NULL },
     { "S12: 2000 Dateien",                           t_many_files, NULL },
     { "S11: Zwischenstand bei langem Lauf",          t_checkpoint, NULL },
+    { "S15: zu lange Namen uebersprungen",           t_long_names, NULL },
     { "kaputter Stand (AmiCloud)",                   t_corrupt_baseline_ac, NULL },
     { "AmiCloud: Ordner-Loeschen behaelt neue Datei", t_ac_dir_delete_keeps_new_file, NULL },
     { "S2: Abbruch mitten im Lauf",                  t_break_mid_run, NULL },

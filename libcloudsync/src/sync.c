@@ -245,24 +245,51 @@ static void case_skips_free(CaseSkips *cs)
     cs->items = NULL; cs->n = 0;
 }
 
-/* Fills cs with the folded paths that occur more than once in idx. 0 on
- * out of memory. */
+/* 1 if path is one of the skipped paths or lies below one */
+static int case_skipped(const CaseSkips *cs, const char *path);
+
+/* S15: adds every remote path whose own name is longer than name_max
+ * (and is not below an already skipped one) to cs; *count is the number
+ * added. cs->items gets room for idx->n entries here -- the case check
+ * after it adds to the same list. 0 on out of memory. */
+static int find_long_names(const SyncIndex *idx, int name_max, CaseSkips *cs, int *count)
+{
+    int i;
+    cs->items = NULL; cs->n = 0; *count = 0;
+    if (!idx->n) return 1;
+    cs->items = (char **)malloc(sizeof(char *) * (size_t)idx->n);
+    if (!cs->items) return 0;
+    for (i = 0; i < idx->n; i++) {
+        const char *p = idx->items[i].path, *name = strrchr(p, '/');
+        char f[AC_MAX_PATH];
+        name = name ? name + 1 : p;
+        if ((int)strlen(name) <= name_max || case_skipped(cs, p)) continue;
+        ui_notify(UI_WARN, "'%s': Name laenger als %d Zeichen, hier nicht moeglich -- uebersprungen",
+                  p, name_max);
+        fold_case(f, sizeof(f), p);
+        if (!(cs->items[cs->n] = sync_dupstr(f))) return 0;
+        cs->n++;
+        (*count)++;
+    }
+    return 1;
+}
+
+/* Adds the folded paths that occur more than once in idx to cs (which
+ * find_long_names() has set up). 0 on out of memory. */
 static int find_case_collisions(const SyncIndex *idx, CaseSkips *cs)
 {
     const SyncEntry **v;
     int i;
-    cs->items = NULL; cs->n = 0;
     if (idx->n < 2) return 1;
     v = (const SyncEntry **)malloc(sizeof(SyncEntry *) * (size_t)idx->n);
-    cs->items = (char **)malloc(sizeof(char *) * (size_t)idx->n);
-    if (!v || !cs->items) { free(v); free(cs->items); cs->items = NULL; return 0; }
+    if (!v) return 0;
     for (i = 0; i < idx->n; i++) v[i] = &idx->items[i];
     qsort(v, (size_t)idx->n, sizeof(SyncEntry *), folded_cmp);
     for (i = 1; i < idx->n; i++) {
         char f[AC_MAX_PATH];
         if (folded_cmp(&v[i - 1], &v[i]) != 0) continue;
         fold_case(f, sizeof(f), v[i]->path);
-        if (cs->n && strcmp(cs->items[cs->n - 1], f) == 0) continue;
+        if (case_skipped(cs, v[i]->path)) continue;   /* already skipped (long name, earlier pair) */
         ui_notify(UI_WARN, "'%s' und '%s' unterscheiden sich nur in Gross-/Kleinschreibung -- "
                   "beide uebersprungen", v[i - 1]->path, v[i]->path);
         if (!(cs->items[cs->n] = sync_dupstr(f))) { free(v); return 0; }
@@ -842,6 +869,20 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     qsort(ridx.items, (size_t)ridx.n, sizeof(SyncEntry), sync_entry_cmp);
     qsort(lidx.items, (size_t)lidx.n, sizeof(SyncEntry), sync_entry_cmp);
 
+    /* S15: names the local file system would truncate (classic FFS: 30)
+     * -- truncated they would collide or be uploaded under the short
+     * name while the original gets deleted on the server */
+    {
+        int name_max = opts->name_max > 0 ? opts->name_max
+                     : dry_run ? 255 : localfs_name_max(local_root);
+        if (!find_long_names(&ridx, name_max, &case_skips, &out->skipped)) {
+            ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: kein Speicher");
+            out->errors++;
+            out->aborted = 1;
+            goto out_free;
+        }
+    }
+
     /* S6 (a dry run must not write the probe file: assume insensitive) */
     if ((dry_run || !localfs_case_sensitive(local_root)) &&
         !find_case_collisions(&ridx, &case_skips)) {
@@ -850,8 +891,8 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
         out->aborted = 1;
         goto out_free;
     }
-    if (case_skips.n) {
-        out->conflicts += case_skips.n;
+    if (case_skips.n > out->skipped) {
+        out->conflicts += case_skips.n - out->skipped;
         new_st.had_conflicts = 1;
     }
 
