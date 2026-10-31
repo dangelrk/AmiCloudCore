@@ -117,10 +117,6 @@ static int sync_entry_cmp(const void *a, const void *b)
     return strcmp(((const SyncEntry *)a)->path, ((const SyncEntry *)b)->path);
 }
 
-static int syncstate_entry_cmp(const void *a, const void *b)
-{
-    return strcmp(((const SyncStateEntry *)a)->path, ((const SyncStateEntry *)b)->path);
-}
 
 /* Recursively lists the remote tree into idx, one extra `list` request
  * per subdirectory. Relative paths so a plain strcmp() sort always puts
@@ -389,6 +385,7 @@ typedef struct {
     long size;  /* UPLOAD/DOWNLOAD only, for the byte-percentage */
     int  failed; /* set in Pass 2 on failure -- triggers a baseline rollback */
     int  skipped;/* not executed (break, changed since the scan) -- rolled back */
+    int  done;   /* processed in Pass 2 (successfully or not) */
     int  is_dir; /* DEL_LOCAL/DEL_REMOTE: a directory */
     /* DOWNLOAD/DEL_LOCAL: the local file as seen by the scan, re-checked
      * right before it is replaced or deleted (S7) */
@@ -651,6 +648,32 @@ static void rollback_baseline_entry(SyncState *new_st, SyncState *old_st, const 
                         old->revision, old->server_id, old->last_sync);
 }
 
+/* S11: a long run saves what is really done so far every
+ * SYNC_CHECKPOINT_ACTIONS actions or SYNC_CHECKPOINT_SECS seconds -- a
+ * crash or power cut after hours then loses little. The checkpoint is
+ * the predicted new baseline with every pending, failed or skipped
+ * action rolled back, and the OLD global_revision (so the next run scans
+ * fully). */
+#define SYNC_CHECKPOINT_ACTIONS 50
+#define SYNC_CHECKPOINT_SECS    120
+
+static void save_checkpoint(const char *local_root, const SyncState *new_st,
+                            SyncState *old_st, const SyncActions *acts)
+{
+    SyncState cp;
+    int i;
+    if (!syncstate_copy(&cp, new_st)) return;   /* no memory: just no checkpoint */
+    for (i = 0; i < acts->n; i++) {
+        const SyncAction *a = &acts->items[i];
+        if (!a->done || a->failed || a->skipped)
+            rollback_baseline_entry(&cp, old_st, a->relpath);
+    }
+    cp.global_revision = old_st->global_revision;
+    cp.had_conflicts = old_st->had_conflicts || new_st->had_conflicts;
+    syncstate_save(local_root, &cp);
+    syncstate_free(&cp);
+}
+
 /* Smallest of up to three (possibly NULL) current merge-scan keys. */
 static const char *pick_min_path(const char *a, const char *b, const char *c)
 {
@@ -715,6 +738,8 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     char        summary[256];
     char        errpath[AC_MAX_PATH];
     CaseSkips   case_skips = { NULL, 0 };
+    int         cp_actions = 0;   /* S11 checkpoint counters */
+    long        cp_time;
 
     if (!opts) { sync_options_init(&defaults); opts = &defaults; }
     dry_run = opts->dry_run;
@@ -762,7 +787,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
         out->aborted = 1;
         goto out_free;
     }
-    qsort(old_st.items, (size_t)old_st.n, sizeof(SyncStateEntry), syncstate_entry_cmp);
+    /* old_st is sorted by path already (syncstate.h, S12) */
 
     /* Both sides are created if missing -- never in a dry run. S4: with a
      * baseline the remote root is expected to exist; if it is gone (e.g.
@@ -1020,6 +1045,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     /* Pass 2a: mkdir/upload/download/align, same order and progress
      * bookkeeping as before this rewrite. */
     progress_reset(pr);
+    cp_time = (long)time(NULL);
     for (i = 0; i < acts.n; i++) {
         if (acts.items[i].type == SA_UPLOAD || acts.items[i].type == SA_DOWNLOAD) {
             pr->total++;
@@ -1153,7 +1179,14 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
             break;
         case SA_DEL_LOCAL:
         case SA_DEL_REMOTE:
-            break; /* handled leaf-first in Pass 2b below */
+            continue; /* handled leaf-first in Pass 2b below */
+        }
+        act->done = 1;
+        if (!dry_run && (++cp_actions >= SYNC_CHECKPOINT_ACTIONS ||
+                         (long)time(NULL) - cp_time >= SYNC_CHECKPOINT_SECS)) {
+            save_checkpoint(local_root, &new_st, &old_st, &acts);
+            cp_actions = 0;
+            cp_time = (long)time(NULL);
         }
     }
 
@@ -1199,6 +1232,13 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                     act->failed = 1; out->errors++;
                     ac_log_printf("sync: Loeschen (remote) fehlgeschlagen: %s\n", act->rpath);
                 }
+            }
+            act->done = 1;
+            if (!dry_run && (++cp_actions >= SYNC_CHECKPOINT_ACTIONS ||
+                             (long)time(NULL) - cp_time >= SYNC_CHECKPOINT_SECS)) {
+                save_checkpoint(local_root, &new_st, &old_st, &acts);
+                cp_actions = 0;
+                cp_time = (long)time(NULL);
             }
         }
         free(del_ptrs);

@@ -91,8 +91,9 @@ int syncstate_load(const char *local_root, SyncState *st);
  * success. */
 int syncstate_save(const char *local_root, const SyncState *st);
 
-/* Linear lookup by path (small/medium trees -- see syncstate.c). NULL if
- * not present. */
+/* Lookup by path, binary search -- items are always kept sorted by path
+ * (strcmp order; upsert inserts in place, remove keeps the order). NULL
+ * if not present. Pointers are valid until the next upsert/remove. */
 SyncStateEntry *syncstate_find(SyncState *st, const char *path);
 
 /* Inserts a new entry for path, or overwrites the existing one -- path is
@@ -106,8 +107,11 @@ void syncstate_upsert(SyncState *st, const char *path, int is_dir, long size, lo
  * memory. */
 int syncstate_set_identity(SyncState *st, const char *id);
 
-/* Removes the entry for path, if present. Order of the remaining entries
- * is not preserved. */
+/* Deep copy of src into dst (initialised here). 0 on out of memory, dst
+ * is then empty. */
+int syncstate_copy(SyncState *dst, const SyncState *src);
+
+/* Removes the entry for path, if present; the order is kept. */
 void syncstate_remove(SyncState *st, const char *path);
 
 void syncstate_free(SyncState *st);

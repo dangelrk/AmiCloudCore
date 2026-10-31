@@ -1166,6 +1166,92 @@ static void t_put_result(void)
     env_free(&e);
 }
 
+/* S12: the baseline stays sorted through inserts and removes in any order */
+static void t_syncstate_sorted(void)
+{
+    SyncState st;
+    char p[32];
+    int i, ok = 1;
+    memset(&st, 0, sizeof(st));
+    for (i = 0; i < 500; i++) {
+        snprintf(p, sizeof(p), "d%03d/f%03d", (i * 7919) % 500, i % 13);
+        syncstate_upsert(&st, p, 0, i, T0, "", "", 1, 0, T0);
+    }
+    for (i = 0; i < 500; i += 3) {
+        snprintf(p, sizeof(p), "d%03d/f%03d", (i * 7919) % 500, i % 13);
+        syncstate_remove(&st, p);
+    }
+    for (i = 1; i < st.n; i++)
+        if (strcmp(st.items[i - 1].path, st.items[i].path) >= 0) ok = 0;
+    CHECK(ok);
+    for (i = 0; i < 500; i++) {
+        snprintf(p, sizeof(p), "d%03d/f%03d", (i * 7919) % 500, i % 13);
+        CHECK((syncstate_find(&st, p) != NULL) == (i % 3 != 0));
+    }
+    syncstate_free(&st);
+}
+
+/* S11: a checkpoint during a long run holds exactly what is done --
+ * read back from disk at the 70th upload, as after a crash */
+typedef struct { Env *e; int puts; int entries; int has_first; int has_last; long grev; } Cp;
+
+static void cp_hook(FakeTransport *f, FakeOp op, const char *path, void *ud)
+{
+    Cp *c = (Cp *)ud;
+    SyncState st;
+    (void)f; (void)path;
+    if (op != FOP_PUT || ++c->puts != 70) return;
+    syncstate_load(c->e->local, &st);
+    c->entries = st.n;
+    c->has_first = syncstate_find(&st, "f000.txt") != NULL;
+    c->has_last = syncstate_find(&st, "f119.txt") != NULL;
+    c->grev = st.global_revision;
+    syncstate_free(&st);
+}
+
+static void t_checkpoint(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    Cp c;
+    char rel[32];
+    int i;
+    lw(&e, "keep.txt", "k", T0);
+    run(&e);
+    for (i = 0; i < 120; i++) {
+        snprintf(rel, sizeof(rel), "f%03d.txt", i);
+        lw(&e, rel, rel, T0);
+    }
+    memset(&c, 0, sizeof(c));
+    c.e = &e;
+    e.f.hook = cp_hook; e.f.hook_ud = &c;
+    run(&e);
+    e.f.hook = NULL;
+    CHECK_EQ(c.entries, 1 + 50);          /* keep.txt + the first 50 uploads */
+    CHECK(c.has_first);
+    CHECK(!c.has_last);
+    CHECK(c.grev != 0);                    /* the OLD counter of the first run */
+    CHECK_EQ(e.s.uploaded, 120);
+    check_idle(&e);
+    env_free(&e);
+}
+
+/* a larger tree: first sync, then an idle run (was O(n^2) before S12) */
+static void t_many_files(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    char rel[64];
+    int i;
+    for (i = 0; i < 2000; i++) {
+        snprintf(rel, sizeof(rel), "dir%02d/file%04d.txt", i % 40, i);
+        fake_put_data(&e.f, rp(&e, rel), "x", T0);
+    }
+    run(&e);
+    CHECK_EQ(e.s.downloaded, 2000);
+    run(&e);
+    CHECK_EQ(e.s.downloaded + e.s.uploaded + e.s.deleted, 0);
+    env_free(&e);
+}
+
 /* ------------------------------------------------------------------ */
 typedef struct { const char *name; void (*fn)(void); const char *risk; } Test;
 
@@ -1208,6 +1294,9 @@ static const Test tests[] = {
     { "WebDAV: kein Hin und Her",                    t_dav_no_flipflop, NULL },
     { "fehlende Wurzel wird angelegt (heute)",       t_missing_root_created, NULL },
     { "Stand speichern/laden",                       t_syncstate_roundtrip, NULL },
+    { "S12: Stand bleibt sortiert",                  t_syncstate_sorted, NULL },
+    { "S12: 2000 Dateien",                           t_many_files, NULL },
+    { "S11: Zwischenstand bei langem Lauf",          t_checkpoint, NULL },
     { "kaputter Stand (AmiCloud)",                   t_corrupt_baseline_ac, NULL },
     { "AmiCloud: Ordner-Loeschen behaelt neue Datei", t_ac_dir_delete_keeps_new_file, NULL },
     { "S2: Abbruch mitten im Lauf",                  t_break_mid_run, NULL },

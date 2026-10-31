@@ -166,21 +166,37 @@ int syncstate_save(const char *local_root, const SyncState *st)
     return 1;
 }
 
+/* S12: items are always kept sorted by path (strcmp), so lookups are a
+ * binary search. Returns the index of path, or -(insert position)-1. */
+static int ss_search(const SyncState *st, const char *path)
+{
+    int lo = 0, hi = st->n - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        int c = strcmp(st->items[mid].path, path);
+        if (c == 0) return mid;
+        if (c < 0) lo = mid + 1; else hi = mid - 1;
+    }
+    return -lo - 1;
+}
+
 SyncStateEntry *syncstate_find(SyncState *st, const char *path)
 {
-    int i;
-    for (i = 0; i < st->n; i++) {
-        if (strcmp(st->items[i].path, path) == 0) return &st->items[i];
-    }
-    return NULL;
+    int i = ss_search(st, path);
+    return i >= 0 ? &st->items[i] : NULL;
 }
 
 void syncstate_upsert(SyncState *st, const char *path, int is_dir, long size, long mtime,
                       const char *md5, const char *token,
                       long revision, long server_id, long last_sync)
 {
-    SyncStateEntry *e = syncstate_find(st, path);
-    if (!e) {
+    SyncStateEntry *e;
+    int i = ss_search(st, path);
+    if (i >= 0) {
+        e = &st->items[i];
+    } else {
+        char *copy;
+        i = -i - 1;   /* insert position; appends in sorted order move nothing */
         if (st->n == st->cap) {
             int newcap = st->cap ? st->cap * 2 : 64;
             SyncStateEntry *tmp = (SyncStateEntry *)realloc(st->items, sizeof(SyncStateEntry) * (size_t)newcap);
@@ -188,9 +204,13 @@ void syncstate_upsert(SyncState *st, const char *path, int is_dir, long size, lo
             st->items = tmp;
             st->cap = newcap;
         }
-        e = &st->items[st->n++];
+        copy = ss_dupstr(path);
+        if (!copy) return;
+        memmove(&st->items[i + 1], &st->items[i], sizeof(SyncStateEntry) * (size_t)(st->n - i));
+        st->n++;
+        e = &st->items[i];
         memset(e, 0, sizeof(*e));
-        e->path = ss_dupstr(path);
+        e->path = copy;
     }
     e->is_dir    = is_dir;
     e->size      = size;
@@ -204,17 +224,30 @@ void syncstate_upsert(SyncState *st, const char *path, int is_dir, long size, lo
     e->last_sync = last_sync;
 }
 
-void syncstate_remove(SyncState *st, const char *path)
+int syncstate_copy(SyncState *dst, const SyncState *src)
 {
     int i;
-    for (i = 0; i < st->n; i++) {
-        if (strcmp(st->items[i].path, path) == 0) {
-            free(st->items[i].path);
-            st->items[i] = st->items[st->n - 1];
-            st->n--;
-            return;
-        }
+    state_init(dst);
+    for (i = 0; i < src->n; i++) {
+        const SyncStateEntry *e = &src->items[i];
+        int before = dst->n;
+        syncstate_upsert(dst, e->path, e->is_dir, e->size, e->mtime, e->md5, e->token,
+                         e->revision, e->server_id, e->last_sync);
+        if (dst->n == before) { syncstate_free(dst); return 0; }
     }
+    dst->global_revision = src->global_revision;
+    dst->had_conflicts = src->had_conflicts;
+    if (!syncstate_set_identity(dst, src->identity)) { syncstate_free(dst); return 0; }
+    return 1;
+}
+
+void syncstate_remove(SyncState *st, const char *path)
+{
+    int i = ss_search(st, path);
+    if (i < 0) return;
+    free(st->items[i].path);
+    memmove(&st->items[i], &st->items[i + 1], sizeof(SyncStateEntry) * (size_t)(st->n - i - 1));
+    st->n--;
 }
 
 void syncstate_free(SyncState *st)
