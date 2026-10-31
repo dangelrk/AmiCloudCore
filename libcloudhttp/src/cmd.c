@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Ronny Krueger
  */
 #include "cmd.h"
+#include "charset.h"
 #include "http.h"
 #include "md5.h"
 #include "progress.h"  /* ac_format_kb() */
@@ -44,6 +45,19 @@ static const char *qp(const char *path)
     static int k;
     k ^= 1;
     url_encode(buf[k], sizeof(buf[k]), path ? path : "");
+    return buf[k];
+}
+
+/* A server path or name (UTF-8) for display: in the local codeset
+ * (charset.h; the identity on the PC). Two rotating buffers. All paths
+ * this module takes and returns are UTF-8; only what it prints is
+ * converted. */
+static const char *disp(const char *utf8)
+{
+    static char buf[2][AC_MAX_PATH];
+    static int k;
+    k ^= 1;
+    cs_from_utf8(utf8 ? utf8 : "", buf[k], sizeof(buf[k]));
     return buf[k];
 }
 
@@ -226,6 +240,7 @@ int cmd_list_mode(const AcConfig *cfg, const char *remote_path, ListMode mode)
         const char  *sum  = jstr(e, "md5");
 
         if (!name) continue;
+        name = disp(name);
 
         switch (mode) {
         case LIST_NAMES:
@@ -626,14 +641,14 @@ int cmd_get_md5(const AcConfig *cfg, const char *remote_path, char *hex_out, siz
     if (!root || !check_status(root, url)) { if (root_val) json_value_free(root_val); return 1; }
 
     if (strcmp(jstr(root, "type"), "dir") == 0) {
-        ui_notify(UI_ERROR, "amicloudcore: md5: '%s' is a directory", remote_path);
+        ui_notify(UI_ERROR, "amicloudcore: md5: '%s' is a directory", disp(remote_path));
         json_value_free(root_val);
         return 1;
     }
 
     sum = jstr(root, "md5");
     if (!sum[0]) {
-        ui_notify(UI_ERROR, "amicloudcore: md5: no checksum available for '%s'", remote_path);
+        ui_notify(UI_ERROR, "amicloudcore: md5: no checksum available for '%s'", disp(remote_path));
         json_value_free(root_val);
         return 1;
     }
@@ -659,8 +674,7 @@ static const char *get_target(const char *local_path, const char *rpath,
     const char *slash;
     if (local_path && *local_path) return local_path;
     slash = strrchr(rpath, '/');
-    strncpy(local_buf, slash ? slash + 1 : rpath, lsz - 1);
-    local_buf[lsz - 1] = '\0';
+    cs_from_utf8(slash ? slash + 1 : rpath, local_buf, lsz);   /* local codeset */
     return local_buf;
 }
 
@@ -760,8 +774,12 @@ static int put_target(const AcConfig *cfg, const char *local_path,
                       "please give the remote path explicitly (put <local> <remote>)", local_path);
             return 0;
         }
-        snprintf(rpath, rsz, "%s/%s",
-                 strcmp(cfg->basepath, "/") == 0 ? "" : cfg->basepath, name);
+        {
+            char uname[AC_MAX_PATH];
+            cs_to_utf8(name, uname, sizeof(uname));   /* server names are UTF-8 */
+            snprintf(rpath, rsz, "%s/%s",
+                     strcmp(cfg->basepath, "/") == 0 ? "" : cfg->basepath, uname);
+        }
     }
     return 1;
 }
@@ -842,7 +860,7 @@ int cmd_put_cond(const AcConfig *cfg, const char *local_path, const char *remote
         if (m) strncpy(info->md5, m, sizeof(info->md5) - 1);
     }
     if (root_val) json_value_free(root_val);
-    if (ok) ui_notify(UI_INFO, "Uploaded %s -> %s", local_path, rpath);
+    if (ok) ui_notify(UI_INFO, "Uploaded %s -> %s", local_path, disp(rpath));
     return ok ? 0 : 1;
 }
 
@@ -891,16 +909,16 @@ int cmd_put_checked(const AcConfig *cfg, const char *local_path,
         state = remote_state(cfg, rpath);
         if (state < 0) {
             ui_notify(UI_ERROR, "amicloudcore: put: cannot check whether '%s' already "
-                      "exists on the server -- nothing transferred", rpath);
+                      "exists on the server -- nothing transferred", disp(rpath));
             return 1;
         }
         if (state == 2) {
             ui_notify(UI_ERROR, "amicloudcore: put: '%s' is a directory on the server -- "
-                      "give the target path including the file name", rpath);
+                      "give the target path including the file name", disp(rpath));
             return 1;
         }
         if (state == 1 && !ui_confirm("'%s' already exists on the server. Overwrite?", rpath)) {
-            ui_notify(UI_WARN, "amicloudcore: put: '%s' not overwritten", rpath);
+            ui_notify(UI_WARN, "amicloudcore: put: '%s' not overwritten", disp(rpath));
             return 1;
         }
     }
@@ -982,7 +1000,7 @@ int cmd_del(const AcConfig *cfg, const char *remote_path)
     root = root_val ? json_value_get_object(root_val) : NULL;
     ok = root && check_status(root, url);
     if (root_val) json_value_free(root_val);
-    if (ok) ui_notify(UI_INFO, "Deleted %s", rpath);
+    if (ok) ui_notify(UI_INFO, "Deleted %s", disp(rpath));
     return ok ? 0 : 1;
 }
 
@@ -1067,7 +1085,7 @@ int cmd_info(const AcConfig *cfg, const char *remote_path)
 
     if (cmd_info_raw(cfg, remote_path, &info) != 0) return 1;
 
-    ui_notify(UI_INFO, "Name     : %s", info.name);
+    ui_notify(UI_INFO, "Name     : %s", disp(info.name));
     ui_notify(UI_INFO, "Type     : %s", info.type);
     ui_notify(UI_INFO, "Size     : %ld bytes", info.size);
     ui_notify(UI_INFO, "MIME     : %s", info.mime);
@@ -1076,7 +1094,7 @@ int cmd_info(const AcConfig *cfg, const char *remote_path)
     prot_str(info.protection, pbuf);
     ui_notify(UI_INFO, "Protect  : %s (%ld)", pbuf, info.protection);
     if (info.comment[0])
-        ui_notify(UI_INFO, "Comment  : %s", info.comment);
+        ui_notify(UI_INFO, "Comment  : %s", disp(info.comment));
 
     return 0;
 }
@@ -1109,7 +1127,7 @@ int cmd_rename(const AcConfig *cfg, const char *from_path, const char *to_path)
     root = root_val ? json_value_get_object(root_val) : NULL;
     ok = root && check_status(root, url);
     if (root_val) json_value_free(root_val);
-    if (ok) ui_notify(UI_INFO, "Renamed %s -> %s", rfrom, rto);
+    if (ok) ui_notify(UI_INFO, "Renamed %s -> %s", disp(rfrom), disp(rto));
     return ok ? 0 : 1;
 }
 
@@ -1197,7 +1215,7 @@ int cmd_mkdir(const AcConfig *cfg, const char *remote_path)
     root = root_val ? json_value_get_object(root_val) : NULL;
     ok = root && check_status(root, url);
     if (root_val) json_value_free(root_val);
-    if (ok) ui_notify(UI_INFO, "Created directory %s", rpath);
+    if (ok) ui_notify(UI_INFO, "Created directory %s", disp(rpath));
     return ok ? 0 : 1;
 }
 
@@ -1326,7 +1344,7 @@ int cmd_del_recursive(const AcConfig *cfg, const char *remote_path)
     root = root_val ? json_value_get_object(root_val) : NULL;
     ok = root && check_status(root, url);
     if (root_val) json_value_free(root_val);
-    if (ok) ui_notify(UI_INFO, "Deleted %s (recursive)", rpath);
+    if (ok) ui_notify(UI_INFO, "Deleted %s (recursive)", disp(rpath));
     return ok ? 0 : 1;
 }
 
