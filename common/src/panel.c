@@ -23,6 +23,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* a server name (UTF-8) for progress lines and prompts */
+static const char *disp_name(const char *utf8)
+{
+    static char buf[AC_MAX_PATH];
+    cs_from_utf8(utf8, buf, sizeof(buf));
+    return buf;
+}
+
 /* ------------------------------------------------------------------ */
 /* Remote path resolution (moved verbatim from shell.c)                 */
 /* ------------------------------------------------------------------ */
@@ -127,7 +135,7 @@ void count_remote_tree(const AcConfig *cfg, const char *remote_path, Progress *p
      * pump, not a real byte count, and its own return doubles as an
      * early-exit so a cancelled scan doesn't keep walking a huge tree
      * just to throw the count away. */
-    if (!ui_progress(0, -1, remote_path)) return;
+    if (!ui_progress(0, -1, disp_name(remote_path))) return;
     if (!cmd_list_raw(cfg, remote_path, &entries, &n)) return;
     for (i = 0; i < n; i++) {
         if (entries[i].is_dir) {
@@ -297,14 +305,6 @@ void panel_copy_file(PanelSource ssrc, const AcConfig *scfg, const char *spath,
         c->pr.err++;
         ui_notify(UI_ERROR, "amicloudcore: unsupported copy direction for %s", name);
     }
-}
-
-/* a server name (UTF-8) for progress lines and prompts */
-static const char *disp_name(const char *utf8)
-{
-    static char buf[AC_MAX_PATH];
-    cs_from_utf8(utf8, buf, sizeof(buf));
-    return buf;
 }
 
 void panel_get_dir(const AcConfig *cfg, const char *remote_path,
