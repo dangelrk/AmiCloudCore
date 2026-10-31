@@ -32,13 +32,28 @@ int cmd_last_status(void)
     return g_last_status;
 }
 
+static void url_encode(char *out, size_t outsz, const char *in);
+
+/* A path as a query parameter: percent-encoded (spaces, '&', '#', '+'
+ * and non-ASCII bytes would otherwise break the request or the
+ * parameter). Two rotating buffers, enough for one snprintf with a
+ * source and a target path. */
+static const char *qp(const char *path)
+{
+    static char buf[2][3 * AC_MAX_PATH + 1];
+    static int k;
+    k ^= 1;
+    url_encode(buf[k], sizeof(buf[k]), path ? path : "");
+    return buf[k];
+}
+
 static void build_url(char *out, size_t sz,
                       const AcConfig *cfg,
                       const char *action,
                       const char *path)
 {
     snprintf(out, sz, "%s/api.php?action=%s&path=%s",
-             cfg->server, action, path);
+             cfg->server, action, qp(path));
 }
 
 static void full_path(char *out, size_t sz,
@@ -537,7 +552,7 @@ int cmd_search(const AcConfig *cfg, const char *root, const char *pattern,
     full_path(rpath, sizeof(rpath), cfg, root);
     url_encode(enc, sizeof(enc), pattern);
     snprintf(url, sizeof(url), "%s/api.php?action=search&path=%s&q=%s&dirs=%d",
-             cfg->server, rpath, enc, dirs_too ? 1 : 0);
+             cfg->server, qp(rpath), enc, dirs_too ? 1 : 0);
 
     resp = http_request("GET", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
@@ -799,7 +814,7 @@ int cmd_put_cond(const AcConfig *cfg, const char *local_path, const char *remote
     else if (create_only)
         snprintf(cond, sizeof(cond), "&create_only=1");
     snprintf(url, sizeof(url), "%s/api.php?action=upload&path=%s&md5=%s%s",
-             cfg->server, rpath, md5hex, cond);
+             cfg->server, qp(rpath), md5hex, cond);
 
     resp = http_upload(url, auth, fp, fsize, cfg->verify_ssl, local_path);
     g_last_status = resp ? resp->status_code : 0;
@@ -1081,7 +1096,7 @@ int cmd_rename(const AcConfig *cfg, const char *from_path, const char *to_path)
     full_path(rfrom, sizeof(rfrom), cfg, from_path);
     full_path(rto,   sizeof(rto),   cfg, to_path);
     snprintf(url, sizeof(url), "%s/api.php?action=rename&path=%s&to=%s",
-             cfg->server, rfrom, rto);
+             cfg->server, qp(rfrom), qp(rto));
 
     resp = http_request("POST", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
@@ -1113,7 +1128,7 @@ int cmd_setcomment(const AcConfig *cfg, const char *remote_path, const char *com
     full_path(rpath, sizeof(rpath), cfg, remote_path);
     url_encode(enc, sizeof(enc), comment);
     snprintf(url, sizeof(url), "%s/api.php?action=setcomment&path=%s&comment=%s",
-             cfg->server, rpath, enc);
+             cfg->server, qp(rpath), enc);
 
     resp = http_request("POST", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
@@ -1140,7 +1155,7 @@ int cmd_setprotect(const AcConfig *cfg, const char *remote_path, long bits)
     make_auth(auth, sizeof(auth), cfg);
     full_path(rpath, sizeof(rpath), cfg, remote_path);
     snprintf(url, sizeof(url), "%s/api.php?action=setprotect&path=%s&bits=%ld",
-             cfg->server, rpath, bits);
+             cfg->server, qp(rpath), bits);
 
     resp = http_request("POST", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
@@ -1229,7 +1244,7 @@ int cmd_setdate_mtime(const AcConfig *cfg, const char *remote_path, long mtime_e
     make_auth(auth, sizeof(auth), cfg);
     full_path(rpath, sizeof(rpath), cfg, remote_path);
     snprintf(url, sizeof(url), "%s/api.php?action=setdate&path=%s&mtime=%ld",
-             cfg->server, rpath, mtime_epoch);
+             cfg->server, qp(rpath), mtime_epoch);
 
     resp = http_request("POST", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
@@ -1290,7 +1305,7 @@ int cmd_del_recursive(const AcConfig *cfg, const char *remote_path)
     make_auth(auth, sizeof(auth), cfg);
     full_path(rpath, sizeof(rpath), cfg, remote_path);
     snprintf(url, sizeof(url), "%s/api.php?action=delete&path=%s&recursive=1",
-             cfg->server, rpath);
+             cfg->server, qp(rpath));
 
     resp = http_request("DELETE", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
@@ -1453,7 +1468,7 @@ int cmd_put_buf(const AcConfig *cfg, const char *remote_path, const char *buf, l
     make_auth(auth, sizeof(auth), cfg);
     full_path(rpath, sizeof(rpath), cfg, remote_path);
     snprintf(url, sizeof(url), "%s/api.php?action=upload&path=%s&md5=%s",
-             cfg->server, rpath, md5hex);
+             cfg->server, qp(rpath), md5hex);
 
     resp = http_request("POST", url, auth, buf, len, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
