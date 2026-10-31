@@ -53,6 +53,21 @@ int cs_from_utf8(const char *utf8, char *out, size_t outsz);
  * not alias in. Always NUL-terminates; 0 if truncated. */
 int cs_nfc(const char *in, char *out, size_t outsz);
 
+/* For the handlers: a server listing name (UTF-8) as shown in a
+ * directory listing, in the local codeset. If the conversion is lossy
+ * ("Preis_.txt" for "Preis\xE2\x82\xAC.txt"), the pair is remembered
+ * (local_dir/out -> utf8_dir/utf8_name, last 128 such names), so that
+ * cs_path_to_utf8() finds the real server name again when the shown name
+ * is opened. local_dir and utf8_dir are the directory's path in both
+ * forms ("/" for the root). Returns like cs_from_utf8(). */
+int cs_list_name(const char *local_dir, const char *utf8_dir, const char *utf8_name,
+                 char *out, size_t outsz);
+
+/* A local path ("/dir/file", as a handler builds it) for the server:
+ * component by component through the remembered lossy names, else
+ * cs_to_utf8(). */
+void cs_path_to_utf8(const char *local, char *out, size_t outsz);
+
 /* For the host unit tests only: make the "local" codeset ASCII (every
  * non-ASCII character is lossy) or ISO-8859-1 (built-in), or back to
  * the platform default with mode 0. */

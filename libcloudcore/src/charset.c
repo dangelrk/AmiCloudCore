@@ -9,6 +9,8 @@
 #include "charset.h"
 #include "amicloud.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "nfc_table.h"
@@ -303,3 +305,87 @@ int cs_from_utf8(const char *utf8, char *out, size_t outsz)
      * decomposed name (NFD) comes back composed and is not exact */
     return r && cs_to_utf8(out, back, sizeof(back)) && strcmp(back, utf8) == 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* Remembered lossy names (handlers)                                    */
+/* ------------------------------------------------------------------ */
+#define CS_REMEMBER 128
+
+static struct { char *l; char *u; } g_mem[CS_REMEMBER];
+static int g_mem_next;
+
+static char *cs_dup(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *d = (char *)malloc(n);
+    if (d) memcpy(d, s, n);
+    return d;
+}
+
+static void join_path(char *out, size_t sz, const char *dir, const char *name)
+{
+    size_t dl = strlen(dir);
+    if (dl && dir[dl - 1] == '/') snprintf(out, sz, "%s%s", dir, name);
+    else snprintf(out, sz, "%s/%s", dir, name);
+}
+
+static const char *mem_find(const char *l)
+{
+    int i;
+    for (i = 0; i < CS_REMEMBER; i++)
+        if (g_mem[i].l && strcmp(g_mem[i].l, l) == 0) return g_mem[i].u;
+    return NULL;
+}
+
+int cs_list_name(const char *local_dir, const char *utf8_dir, const char *utf8_name,
+                 char *out, size_t outsz)
+{
+    char l[AC_MAX_PATH], u[AC_MAX_PATH];
+    int exact = cs_from_utf8(utf8_name, out, outsz);
+    if (exact) return 1;
+    join_path(l, sizeof(l), local_dir, out);
+    join_path(u, sizeof(u), utf8_dir, utf8_name);
+    if (!mem_find(l)) {
+        free(g_mem[g_mem_next].l);
+        free(g_mem[g_mem_next].u);
+        g_mem[g_mem_next].l = cs_dup(l);
+        g_mem[g_mem_next].u = cs_dup(u);
+        g_mem_next = (g_mem_next + 1) % CS_REMEMBER;
+    }
+    return 0;
+}
+
+void cs_path_to_utf8(const char *local, char *out, size_t outsz)
+{
+    char lp[AC_MAX_PATH], comp[AC_MAX_PATH], uc[AC_MAX_PATH];
+    const char *p = local;
+    size_t ll = 0;
+    if (!outsz) return;
+    out[0] = '\0';
+    lp[0] = '\0';
+    if (*p == '/') { strncpy(out, "/", outsz - 1); out[outsz - 1] = '\0'; }
+    while (*p) {
+        const char *slash = strchr(p, '/');
+        size_t n = slash ? (size_t)(slash - p) : strlen(p);
+        const char *mapped;
+        if (n) {
+            if (n >= sizeof(comp)) n = sizeof(comp) - 1;
+            memcpy(comp, p, n); comp[n] = '\0';
+            snprintf(lp + ll, sizeof(lp) - ll, "/%s", comp);
+            ll = strlen(lp);
+            mapped = mem_find(lp);
+            if (mapped) {
+                strncpy(out, mapped, outsz - 1);
+                out[outsz - 1] = '\0';
+            } else {
+                size_t ol = strlen(out);
+                cs_to_utf8(comp, uc, sizeof(uc));
+                snprintf(out + ol, outsz - ol, "%s%s", (ol && out[ol - 1] == '/') ? "" : "/", uc);
+            }
+        }
+        p += n;
+        if (*p == '/') p++;
+    }
+    if (!out[0] && *local != '/') cs_to_utf8(local, out, outsz);
+}
+
