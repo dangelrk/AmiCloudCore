@@ -17,6 +17,7 @@
 #include "localfs.h"
 #include "ui_hooks.h"
 #include "md5.h"
+#include "charset.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -292,6 +293,14 @@ void panel_copy_file(PanelSource ssrc, const AcConfig *scfg, const char *spath,
     }
 }
 
+/* a server name (UTF-8) for progress lines and prompts */
+static const char *disp_name(const char *utf8)
+{
+    static char buf[AC_MAX_PATH];
+    cs_from_utf8(utf8, buf, sizeof(buf));
+    return buf;
+}
+
 void panel_get_dir(const AcConfig *cfg, const char *remote_path,
                    const char *local_path, CopyCtx *c)
 {
@@ -309,14 +318,14 @@ void panel_get_dir(const AcConfig *cfg, const char *remote_path,
      * recursive visit) go by with the Cancel button's click sitting
      * unprocessed the entire time (Amiga: nothing pumps
      * MUIM_Application_NewInput outside a ui_progress() call). */
-    if (!ui_progress(0, -1, basename_of(remote_path))) { c->cancelled = 1; return; }
+    if (!ui_progress(0, -1, disp_name(basename_of(remote_path)))) { c->cancelled = 1; return; }
 
     /* Cheap local existence check (no network) before the remote list —
      * mirrors panel_put_dir()'s cmd_list_raw() existence+snapshot combo. */
     dst_existed = c->ask && localfs_exists(local_path);
     if (dst_existed) {
         UiOverwrite ow = (c->policy != -1) ? (UiOverwrite)c->policy
-                        : ui_overwrite(1, basename_of(remote_path), 0, "", "", 0, "", "");
+                        : ui_overwrite(1, disp_name(basename_of(remote_path)), 0, "", "", 0, "", "");
         if (ow == UI_OW_OVERWRITE_ALL || ow == UI_OW_SKIP_ALL) c->policy = (int)ow;
         if (ow == UI_OW_CANCEL) { c->cancelled = 1; return; }
         if (ow == UI_OW_SKIP || ow == UI_OW_SKIP_ALL) return;
@@ -341,14 +350,16 @@ void panel_get_dir(const AcConfig *cfg, const char *remote_path,
         LocalDirEntry *dst_entries = dst_existed ? local_dir_snapshot(local_path, &dst_n) : NULL;
 
         for (i = 0; i < n; i++) {
-            char rchild[AC_MAX_PATH], lchild[AC_MAX_PATH];
+            char rchild[AC_MAX_PATH], lchild[AC_MAX_PATH], lname[AC_MAX_PATH];
+            /* Phase 4: server names are UTF-8, local ones in the local codeset */
+            cs_from_utf8(entries[i].name, lname, sizeof(lname));
             snprintf(rchild, sizeof(rchild), "%s/%s", remote_path, entries[i].name);
-            localfs_join(lchild, sizeof(lchild), local_path, entries[i].name);
+            localfs_join(lchild, sizeof(lchild), local_path, lname);
             if (entries[i].is_dir) {
                 panel_get_dir(cfg, rchild, lchild, c);
             } else {
                 FileMeta smeta, dmeta;
-                const LocalDirEntry *dle = dst_entries ? find_local_entry(dst_entries, dst_n, entries[i].name) : NULL;
+                const LocalDirEntry *dle = dst_entries ? find_local_entry(dst_entries, dst_n, lname) : NULL;
 
                 smeta.size = entries[i].size;
                 strncpy(smeta.date, entries[i].modified, sizeof(smeta.date) - 1);
@@ -363,7 +374,7 @@ void panel_get_dir(const AcConfig *cfg, const char *remote_path,
                     dmeta.md5[0] = '\0'; /* local files: no MD5 available */
                 }
                 panel_copy_file(PANEL_CLOUD, cfg, rchild, PANEL_LOCAL, NULL, lchild,
-                                entries[i].name, &smeta, dle ? &dmeta : NULL, c);
+                                lname, &smeta, dle ? &dmeta : NULL, c);
             }
             if (c->cancelled) break;
         }
@@ -383,7 +394,7 @@ void panel_put_dir(const AcConfig *cfg, const char *local_path,
 
     if (c->cancelled) return;
     /* Per-folder pump — see panel_get_dir()'s counterpart above for why. */
-    if (!ui_progress(0, -1, basename_of(remote_path))) { c->cancelled = 1; return; }
+    if (!ui_progress(0, -1, disp_name(basename_of(remote_path)))) { c->cancelled = 1; return; }
 
     /* cmd_is_dir() first, silently — a new top-level folder not existing
      * yet on the remote side is the ordinary case (every first upload of
@@ -401,7 +412,7 @@ void panel_put_dir(const AcConfig *cfg, const char *local_path,
                 && cmd_list_raw(cfg, remote_path, &dst_entries, &dst_n);
     if (dst_existed) {
         UiOverwrite ow = (c->policy != -1) ? (UiOverwrite)c->policy
-                        : ui_overwrite(1, basename_of(remote_path), 0, "", "", 0, "", "");
+                        : ui_overwrite(1, disp_name(basename_of(remote_path)), 0, "", "", 0, "", "");
         if (ow == UI_OW_OVERWRITE_ALL || ow == UI_OW_SKIP_ALL) c->policy = (int)ow;
         if (ow == UI_OW_CANCEL) { c->cancelled = 1; cmd_entries_free(dst_entries); return; }
         if (ow == UI_OW_SKIP || ow == UI_OW_SKIP_ALL) { cmd_entries_free(dst_entries); return; }
@@ -420,14 +431,15 @@ void panel_put_dir(const AcConfig *cfg, const char *local_path,
     }
 
     while (localfs_readdir(d, &e)) {
-        char lchild[AC_MAX_PATH], rchild[AC_MAX_PATH];
+        char lchild[AC_MAX_PATH], rchild[AC_MAX_PATH], uname[AC_MAX_PATH];
+        cs_to_utf8(e.name, uname, sizeof(uname));   /* Phase 4: server names are UTF-8 */
         localfs_join(lchild, sizeof(lchild), local_path, e.name);
-        snprintf(rchild, sizeof(rchild), "%s/%s", remote_path, e.name);
+        snprintf(rchild, sizeof(rchild), "%s/%s", remote_path, uname);
         if (e.is_dir) {
             panel_put_dir(cfg, lchild, rchild, c);
         } else {
             FileMeta smeta, dmeta;
-            const AcEntry *ae = dst_entries ? find_entry(dst_entries, dst_n, e.name) : NULL;
+            const AcEntry *ae = dst_entries ? find_entry(dst_entries, dst_n, uname) : NULL;
 
             smeta.size = e.size;
             strncpy(smeta.date, e.modified, sizeof(smeta.date) - 1);
