@@ -22,6 +22,24 @@ int cmd_get_named(const AcConfig *cfg, const char *remote_path, const char *loca
                   const char *display_name);
 int cmd_put  (const AcConfig *cfg, const char *local_path,  const char *remote_path);
 
+/* What the server reports about a file it just stored (upload answer). */
+typedef struct {
+    long revision;
+    long id;
+    long mtime;
+    char md5[40];
+} AcPutInfo;
+
+#define AC_PUT_PRECONDITION 2
+
+/* cmd_put() for the sync kernel: if_revision > 0 writes only if the
+ * remote file still has that revision, create_only only if it does not
+ * exist yet (server 0.2, HTTP 412). Returns 0 on success (info filled if
+ * non-NULL), AC_PUT_PRECONDITION if the condition failed (nothing
+ * written, nothing reported), 1 on any other error (reported). */
+int cmd_put_cond(const AcConfig *cfg, const char *local_path, const char *remote_path,
+                 long if_revision, int create_only, AcPutInfo *info);
+
 /* Overwrite-checked put/get for interactive frontends (amicloud CLI,
  * amicloud-shell): same transfer and same target naming as cmd_put()/
  * cmd_get(), but unless force is set they first check whether the

@@ -56,11 +56,23 @@ static int amicloud_get(SyncTransport *t, const char *remote_path, const char *l
  * return value is deliberately ignored (fire-and-forget), unchanged
  * behaviour. */
 static int amicloud_put(SyncTransport *t, const char *local_path,
-                        const char *remote_path, long mtime)
+                        const char *remote_path, long mtime,
+                        const SyncPutCond *cond, SyncPutResult *res)
 {
-    int rc = cmd_put(t->cfg, local_path, remote_path);
-    if (rc == 0) cmd_setdate_mtime(t->cfg, remote_path, mtime);
-    return rc;
+    AcPutInfo info;
+    int rc = cmd_put_cond(t->cfg, local_path, remote_path,
+                          cond ? cond->if_revision : 0, cond ? cond->create_only : 0, &info);
+    if (rc == AC_PUT_PRECONDITION) return SYNC_PUT_CONFLICT;
+    if (rc != 0) return SYNC_PUT_ERROR;
+    cmd_setdate_mtime(t->cfg, remote_path, mtime);   /* does not change the revision */
+    if (res) {
+        memset(res, 0, sizeof(*res));
+        res->revision = info.revision;
+        res->id       = info.id;
+        strncpy(res->md5, info.md5, sizeof(res->md5) - 1);
+        strncpy(res->token, info.md5, sizeof(res->token) - 1);   /* as amicloud_list() */
+    }
+    return SYNC_PUT_OK;
 }
 
 static int amicloud_del(SyncTransport *t, const char *remote_path)

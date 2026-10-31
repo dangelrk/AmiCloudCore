@@ -1108,6 +1108,64 @@ static void r_upload_overwrites_remote_change(void)
     env_free(&e);
 }
 
+/* S8: a new local file must not overwrite a file that someone created on
+ * the server after the scan */
+static void t_create_only(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    Race r;
+    lw(&e, "a.txt", "mine", T0);
+    memset(&r, 0, sizeof(r));
+    r.op = FOP_PUT; r.e = &e; r.rel = "a.txt"; r.content = "theirs"; r.local = 0;
+    e.f.hook = race_hook; e.f.hook_ud = &r;
+    run(&e);
+    e.f.hook = NULL;
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "theirs"));
+    CHECK(lhas(&e, "a.txt", "mine"));
+    CHECK_EQ(e.s.conflicts, 1);
+    env_free(&e);
+}
+
+static void t_dav_if_match(void)
+{
+    Env e; env_init(&e, FAKE_WEBDAV);
+    Race r;
+    lw(&e, "a.txt", "v1", T0);
+    run(&e); run(&e);
+    lw(&e, "a.txt", "v2 local", T0 + 100);
+    memset(&r, 0, sizeof(r));
+    r.op = FOP_PUT; r.e = &e; r.rel = "a.txt"; r.content = "v2 other client"; r.local = 0;
+    e.f.hook = race_hook; e.f.hook_ud = &r;
+    run(&e);
+    e.f.hook = NULL;
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "v2 other client"));
+    CHECK(lhas(&e, "a.txt", "v2 local"));
+    env_free(&e);
+}
+
+/* S10: after an upload the baseline holds the server's revision, so the
+ * next full scan (S9) sees no remote change and transfers nothing */
+static void t_put_result(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    SyncState st;
+    SyncStateEntry *x;
+    lw(&e, "a.txt", "v1", T0);
+    run(&e);
+    fake_put_data(&e.f, rp(&e, "other.txt"), "x", T0);   /* revisions now differ from a guess */
+    lw(&e, "a.txt", "v2", T0 + 10);
+    run(&e);
+    lw(&e, "a.txt", "v3", T0 + 20);
+    run(&e);
+    syncstate_load(e.local, &st);
+    x = syncstate_find(&st, "a.txt");
+    CHECK(x && x->revision == fake_find(&e.f, rp(&e, "a.txt"))->revision);
+    CHECK(x && x->server_id == fake_find(&e.f, rp(&e, "a.txt"))->id);
+    syncstate_free(&st);
+    check_idle(&e);
+    env_free(&e);
+}
+
 /* ------------------------------------------------------------------ */
 typedef struct { const char *name; void (*fn)(void); const char *risk; } Test;
 
@@ -1172,7 +1230,10 @@ static const Test tests[] = {
     { "S14: fehlgeschlagener Download wiederholt",       r_failed_download_never_retried, NULL },
     { "S7: Download laesst frische Aenderung",          r_download_overwrites_fresh_edit, NULL },
     { "S7: Loeschen laesst frische Aenderung",          t_delete_keeps_fresh_edit,       NULL },
-    { "Upload ueberschreibt fremde Aenderung",           r_upload_overwrites_remote_change, "S8" },
+    { "S8: Upload laesst fremde Aenderung",             r_upload_overwrites_remote_change, NULL },
+    { "S8: neue Datei laesst fremde Neuanlage",         t_create_only, NULL },
+    { "S8: WebDAV If-Match",                            t_dav_if_match, NULL },
+    { "S10: Stand traegt Server-Revision nach Upload",  t_put_result, NULL },
 };
 
 int main(int argc, char **argv)

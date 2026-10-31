@@ -433,9 +433,10 @@ static int webdav_get(SyncTransport *t, const char *remote_path, const char *loc
 
 /* PUT + X-OC-Mtime in one request -- see transport.h's put() contract. */
 static int webdav_put(SyncTransport *t, const char *local_path,
-                      const char *remote_path, long mtime)
+                      const char *remote_path, long mtime,
+                      const SyncPutCond *cond, SyncPutResult *res)
 {
-    char url[AC_MAX_URL], auth[192], hdr[128];
+    char url[AC_MAX_URL], auth[192], hdr[256];
     FILE *fp;
     long fsize;
     HttpResponse *resp;
@@ -450,18 +451,30 @@ static int webdav_put(SyncTransport *t, const char *local_path,
 
     build_url(url, sizeof(url), tbase(t), remote_path);
     make_auth(auth, sizeof(auth), t->cfg);
-    snprintf(hdr, sizeof(hdr), "X-OC-Mtime: %ld\r\n", mtime);
+    /* S8: If-Match with the ETag seen at the last sync, or If-None-Match
+     * for a file that must not exist yet (RFC 7232, 412 otherwise). */
+    if (cond && cond->if_token && cond->if_token[0])
+        snprintf(hdr, sizeof(hdr), "X-OC-Mtime: %ld\r\nIf-Match: %s\r\n", mtime, cond->if_token);
+    else if (cond && cond->create_only)
+        snprintf(hdr, sizeof(hdr), "X-OC-Mtime: %ld\r\nIf-None-Match: *\r\n", mtime);
+    else
+        snprintf(hdr, sizeof(hdr), "X-OC-Mtime: %ld\r\n", mtime);
+    if (res) memset(res, 0, sizeof(*res));   /* the next PROPFIND brings the ETag */
 
     resp = http_upload_hdr("PUT", url, auth, hdr, fp, fsize, t->cfg->verify_ssl, local_path);
     fclose(fp);
 
     if (!resp || resp->status_code == 0) {
         http_response_free(resp);
-        return 1;
+        return SYNC_PUT_ERROR;
+    }
+    if (resp->status_code == 412) {
+        http_response_free(resp);
+        return SYNC_PUT_CONFLICT;
     }
     ok = is_2xx(resp->status_code);
     http_response_free(resp);
-    return ok ? 0 : 1;
+    return ok ? SYNC_PUT_OK : SYNC_PUT_ERROR;
 }
 
 static int webdav_del(SyncTransport *t, const char *remote_path)

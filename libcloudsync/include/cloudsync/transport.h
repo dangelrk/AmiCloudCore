@@ -67,6 +67,28 @@ typedef struct {
     long id;        /* 0 = unknown/unsupported */
 } SyncRemoteEntry;
 
+/* Condition for put() (S8): never overwrite a remote change the kernel
+ * has not seen. Each backend uses what it has -- AmiCloud the numeric
+ * revision, WebDAV the ETag (If-Match) -- and ignores the rest. */
+typedef struct {
+    long        if_revision; /* > 0: only if the remote file has this revision */
+    const char *if_token;    /* non-empty: only if the remote token (ETag) is this */
+    int         create_only; /* only if the remote file does not exist yet */
+} SyncPutCond;
+
+/* What the backend learned about the stored file (S10); zero/"" where
+ * it does not know -- the next listing fills that in. */
+typedef struct {
+    long revision;
+    long id;
+    char md5[64];
+    char token[64];
+} SyncPutResult;
+
+#define SYNC_PUT_OK        0
+#define SYNC_PUT_ERROR     1
+#define SYNC_PUT_CONFLICT  2   /* condition failed, nothing was written */
+
 typedef struct SyncTransport {
     /* Backend-owned context (server URL/credentials/TLS flag). Both the
      * AmiCloud and the WebDAV backend reuse AcConfig as-is — server holds
@@ -90,10 +112,12 @@ typedef struct SyncTransport {
     /* Uploads local_path to remote_path and sets its remote mtime to
      * mtime, as one logical operation (the AmiCloud backend still does
      * this as two internal requests — upload, then a fire-and-forget
-     * setdate exactly like the pre-refactor code did; WebDAV folds it
-     * into a single PUT via the X-OC-Mtime header). */
+     * setdate; WebDAV folds it into a single PUT via the X-OC-Mtime
+     * header). cond may be NULL (unconditional), res may be NULL.
+     * Returns SYNC_PUT_OK, SYNC_PUT_ERROR or SYNC_PUT_CONFLICT. */
     int (*put)(struct SyncTransport *t, const char *local_path,
-               const char *remote_path, long mtime);
+               const char *remote_path, long mtime,
+               const SyncPutCond *cond, SyncPutResult *res);
 
     int (*del)(struct SyncTransport *t, const char *remote_path);
 

@@ -56,6 +56,7 @@ struct FakeTransport {
     /* Failure injection: an operation on a path that equals fail_path[op]
      * or lies below it fails (returns the error code of that op). */
     char fail_path[FOP__N][256];
+    int no_conditions;    /* 1: ignore put() conditions (old server) */
     FakeHook hook;
     void *hook_ud;
 };

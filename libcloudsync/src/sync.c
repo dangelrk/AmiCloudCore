@@ -394,6 +394,11 @@ typedef struct {
      * right before it is replaced or deleted (S7) */
     int  lexists;
     long lsize, lmtime;
+    /* UPLOAD: condition for the server (S8) -- the remote file as the
+     * scan saw it, or create_only if there was none */
+    long if_revision;
+    char if_token[64];
+    int  create_only;
 } SyncAction;
 
 /* oom: an action could not be queued. Its baseline entry is predicted
@@ -426,8 +431,9 @@ static SyncAction *queue_action(SyncActions *acts, SyncActionType type, const ch
     return act;
 }
 
-static void queue_upload(SyncActions *acts, const SyncEntry *le, const char *relpath,
-                        const char *lpath, const char *rpath)
+/* re: the remote file the upload replaces, NULL if there is none (S8) */
+static void queue_upload(SyncActions *acts, const SyncEntry *le, const SyncEntry *re,
+                        const char *relpath, const char *lpath, const char *rpath)
 {
     SyncAction *act = queue_action(acts, SA_UPLOAD, relpath);
     if (!act) return;
@@ -435,6 +441,12 @@ static void queue_upload(SyncActions *acts, const SyncEntry *le, const char *rel
     strncpy(act->rpath, rpath, sizeof(act->rpath) - 1);
     act->mtime = le->mtime;
     act->size  = le->size;
+    if (re) {
+        act->if_revision = re->revision;
+        strncpy(act->if_token, re->token, sizeof(act->if_token) - 1);
+    } else {
+        act->create_only = 1;
+    }
 }
 
 static void note_local(SyncAction *act, const SyncEntry *le)
@@ -918,7 +930,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                                     (re->mtime < le->mtime) ? re->mtime : le->mtime,
                                     le->md5, re->token, re->revision, re->id, now);
                 } else if (local_changed && !remote_changed) {
-                    queue_upload(&acts, le, cur, lpath, rpath);
+                    queue_upload(&acts, le, re, cur, lpath, rpath);
                     /* token left empty: we don't know WebDAV's new ETag
                      * without an extra request, and don't need to -- see
                      * the "unchanged" branch's comment above. */
@@ -957,7 +969,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 queue_mkdir_remote(&acts, cur, rpath);
                 syncstate_upsert(&new_st, cur, 1, 0, le->mtime, "", "", 1, 0, now);
             } else {
-                queue_upload(&acts, le, cur, lpath, rpath);
+                queue_upload(&acts, le, NULL, cur, lpath, rpath);
                 syncstate_upsert(&new_st, cur, 0, le->size, le->mtime, le->md5, "", 1, 0, now);
             }
         } else if (!le && re) {
@@ -1041,9 +1053,37 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 if (verbose) ui_notify(UI_INFO, "(waere hochgeladen)       %s -> %s", act->lpath, act->rpath);
                 out->uploaded++;
             } else {
+                SyncPutCond   cond;
+                SyncPutResult res;
+                int rc;
                 progress_prefix(pr, act->size);
-                if (t->put(t, act->lpath, act->rpath, act->mtime) == 0) {
+                cond.if_revision = act->if_revision;
+                cond.if_token    = act->if_token;
+                cond.create_only = act->create_only;
+                rc = t->put(t, act->lpath, act->rpath, act->mtime, &cond, &res);
+                if (rc == SYNC_PUT_OK) {
+                    /* S10: the server's own view of the new file, instead
+                     * of a guessed revision -- avoids a needless download
+                     * or a false conflict on the next run */
+                    SyncStateEntry *se = syncstate_find(&new_st, act->relpath);
                     out->uploaded++;
+                    if (se) {
+                        if (res.revision > 0) se->revision  = res.revision;
+                        if (res.id > 0)       se->server_id = res.id;
+                        if (res.token[0]) {
+                            strncpy(se->token, res.token, sizeof(se->token) - 1);
+                            se->token[sizeof(se->token) - 1] = '\0';
+                        }
+                    }
+                } else if (rc == SYNC_PUT_CONFLICT) {
+                    /* S8: changed (or created) on the server since the
+                     * scan -- nothing was overwritten; the next run sees
+                     * both changes and reports the conflict */
+                    act->skipped = 1;
+                    out->conflicts++;
+                    new_st.had_conflicts = 1;
+                    ui_notify(UI_WARN, "%s wurde inzwischen auf dem Server geaendert -- "
+                              "nicht ueberschrieben", act->rpath);
                 } else {
                     act->failed = 1;
                     out->errors++;

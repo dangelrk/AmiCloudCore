@@ -756,7 +756,13 @@ static int put_target(const AcConfig *cfg, const char *local_path,
 /* ------------------------------------------------------------------ */
 int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path)
 {
-    char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH];
+    return cmd_put_cond(cfg, local_path, remote_path, 0, 0, NULL) == 0 ? 0 : 1;
+}
+
+int cmd_put_cond(const AcConfig *cfg, const char *local_path, const char *remote_path,
+                 long if_revision, int create_only, AcPutInfo *info)
+{
+    char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH], cond[48];
     long fsize;
     FILE *fp;
     HttpResponse *resp;
@@ -787,8 +793,11 @@ int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path
     fseek(fp, 0, SEEK_SET);
     if (fsize < 0) { fclose(fp); ui_notify(UI_ERROR, "amicloudcore: cannot determine file size"); return 1; }
 
-    snprintf(url, sizeof(url), "%s/api.php?action=upload&path=%s&md5=%s",
-             cfg->server, rpath, md5hex);
+    cond[0] = '\0';
+    if (if_revision > 0)  snprintf(cond, sizeof(cond), "&if_revision=%ld", if_revision);
+    else if (create_only) snprintf(cond, sizeof(cond), "&create_only=1");
+    snprintf(url, sizeof(url), "%s/api.php?action=upload&path=%s&md5=%s%s",
+             cfg->server, rpath, md5hex, cond);
 
     resp = http_upload(url, auth, fp, fsize, cfg->verify_ssl, local_path);
     g_last_status = resp ? resp->status_code : 0;
@@ -799,10 +808,22 @@ int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path
         ui_notify(UI_ERROR, "amicloudcore: network error");
         http_response_free(resp); return 1;
     }
+    if (resp->status_code == 412) {   /* condition not met -- for the caller to handle */
+        http_response_free(resp);
+        return AC_PUT_PRECONDITION;
+    }
     root_val = json_parse_string(resp->body ? resp->body : "{}");
     http_response_free(resp);
     root = root_val ? json_value_get_object(root_val) : NULL;
     ok = root && check_status(root, url);
+    if (ok && info) {
+        const char *m = json_object_get_string(root, "md5");
+        memset(info, 0, sizeof(*info));
+        info->revision = (long)json_object_get_number(root, "revision");
+        info->id       = (long)json_object_get_number(root, "id");
+        info->mtime    = (long)json_object_get_number(root, "mtime");
+        if (m) strncpy(info->md5, m, sizeof(info->md5) - 1);
+    }
     if (root_val) json_value_free(root_val);
     if (ok) ui_notify(UI_INFO, "Uploaded %s -> %s", local_path, rpath);
     return ok ? 0 : 1;

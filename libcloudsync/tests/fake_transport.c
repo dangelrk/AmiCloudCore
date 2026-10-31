@@ -221,7 +221,8 @@ static int ft_get(SyncTransport *t, const char *remote_path, const char *local_p
     return 0;
 }
 
-static int ft_put(SyncTransport *t, const char *local_path, const char *remote_path, long mtime)
+static int ft_put(SyncTransport *t, const char *local_path, const char *remote_path, long mtime,
+                  const SyncPutCond *cond, SyncPutResult *res)
 {
     FakeTransport *f = (FakeTransport *)t;
     char p[1024], par[1024];
@@ -237,6 +238,18 @@ static int ft_put(SyncTransport *t, const char *local_path, const char *remote_p
     if (strcmp(par, "/") != 0 && (!pd || !pd->is_dir)) return 1; /* 409 Conflict */
     n = fake_find(f, p);
     if (n && n->is_dir) return 1;
+    if (res) memset(res, 0, sizeof(*res));
+    if (cond && !f->no_conditions) {   /* S8, like the real backends */
+        char etag[64];
+        if (cond->create_only && n) return SYNC_PUT_CONFLICT;
+        if (f->kind == FAKE_AMICLOUD && cond->if_revision > 0 &&
+            (!n || n->revision != cond->if_revision))
+            return SYNC_PUT_CONFLICT;
+        if (f->kind == FAKE_WEBDAV && cond->if_token && cond->if_token[0]) {
+            if (n) snprintf(etag, sizeof(etag), "\"etag-%ld\"", n->etag);
+            if (!n || strcmp(etag, cond->if_token) != 0) return SYNC_PUT_CONFLICT;
+        }
+    }
 
     fp = fopen(local_path, "rb");
     if (!fp) return 1;
@@ -250,6 +263,12 @@ static int ft_put(SyncTransport *t, const char *local_path, const char *remote_p
     if (!n) n = add_node(f, p, 0);
     set_content(f, n, buf, size, mtime);
     free(buf);
+    if (res && f->kind == FAKE_AMICLOUD) {   /* WebDAV: the next list brings the ETag */
+        entry_md5(n, res->md5);
+        strcpy(res->token, res->md5);
+        res->revision = n->revision;
+        res->id = n->id;
+    }
     return 0;
 }
 
