@@ -106,7 +106,10 @@ void panel_put_dir(const AcConfig *cfg, const char *local_path,
 /* ahead of panel_copy_file().                                            */
 /* ------------------------------------------------------------------ */
 typedef struct {
-    char name[256];
+    char name[256];      /* as shown and on the local side: local codeset */
+    char uname[256];     /* PANEL_CLOUD only: the server name (UTF-8); "" for
+                          * local entries and for names typed by the user --
+                          * those are converted on the way to the server */
     int  is_dir;
     long size;
     char modified[24]; /* display string, local time (both sources) */

@@ -515,7 +515,8 @@ int panel_read(PanelSource src, const AcConfig *cfg, const char *path, PanelList
             if (!out->items) { cmd_entries_free(entries); return 0; }
             for (i = 0; i < n; i++) {
                 PanelEntry *pe = &out->items[i];
-                strncpy(pe->name, entries[i].name, sizeof(pe->name) - 1);
+                cs_from_utf8(entries[i].name, pe->name, sizeof(pe->name));   /* Phase 4 */
+                strncpy(pe->uname, entries[i].name, sizeof(pe->uname) - 1);
                 pe->is_dir = entries[i].is_dir;
                 pe->size   = entries[i].size;
                 strncpy(pe->modified, entries[i].modified, sizeof(pe->modified) - 1);
