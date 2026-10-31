@@ -22,6 +22,7 @@
 #include "ui_hooks.h"
 #include "md5.h"
 #include "syncstate.h"
+#include "charset.h"
 
 /* ac_log_printf() is only declared under PLATFORM_AMIGA in http.h (see
  * cmd.c, which guards every one of its own call sites with #ifdef
@@ -59,6 +60,10 @@ typedef struct {
     char  token[64];
     long  revision;/* remote/baseline entries: server content revision, 0 if unknown */
     long  id;      /* remote/baseline entries: server file ID, 0 if unknown */
+    /* Local entries only: the path as it is on disk, relative to the
+     * root, in the local codeset -- NULL if the same bytes as path (the
+     * UTF-8 key). Phase 4: names are UTF-8 everywhere except on disk. */
+    char *lrel;
 } SyncEntry;
 
 typedef struct { SyncEntry *items; int n, cap; } SyncIndex;
@@ -92,6 +97,7 @@ static int index_add(SyncIndex *idx, const char *path, int is_dir,
     if (!p) return 0;
     e = &idx->items[idx->n++];
     e->path = p;
+    e->lrel = NULL;
     e->is_dir = is_dir;
     e->size = size;
     e->mtime = mtime;
@@ -107,7 +113,7 @@ static int index_add(SyncIndex *idx, const char *path, int is_dir,
 static void index_free(SyncIndex *idx)
 {
     int i;
-    for (i = 0; i < idx->n; i++) free(idx->items[i].path);
+    for (i = 0; i < idx->n; i++) { free(idx->items[i].path); free(idx->items[i].lrel); }
     free(idx->items);
     idx->items = NULL; idx->n = idx->cap = 0;
 }
@@ -235,14 +241,29 @@ static int folded_cmp(const void *a, const void *b)
     return strcmp(fa, fb);
 }
 
-typedef struct { char **items; int n; } CaseSkips;
+typedef struct { char **items; int n, cap; } CaseSkips;
 
 static void case_skips_free(CaseSkips *cs)
 {
     int i;
     for (i = 0; i < cs->n; i++) free(cs->items[i]);
     free(cs->items);
-    cs->items = NULL; cs->n = 0;
+    cs->items = NULL; cs->n = cs->cap = 0;
+}
+
+/* adds a folded path; 0 on out of memory */
+static int skips_add(CaseSkips *cs, const char *folded)
+{
+    char *d;
+    if (cs->n == cs->cap) {
+        int nc = cs->cap ? cs->cap * 2 : 16;
+        char **t = (char **)realloc(cs->items, sizeof(char *) * (size_t)nc);
+        if (!t) return 0;
+        cs->items = t; cs->cap = nc;
+    }
+    if (!(d = sync_dupstr(folded))) return 0;
+    cs->items[cs->n++] = d;
+    return 1;
 }
 
 /* 1 if path is one of the skipped paths or lies below one */
@@ -255,20 +276,17 @@ static int case_skipped(const CaseSkips *cs, const char *path);
 static int find_long_names(const SyncIndex *idx, int name_max, CaseSkips *cs, int *count)
 {
     int i;
-    cs->items = NULL; cs->n = 0; *count = 0;
-    if (!idx->n) return 1;
-    cs->items = (char **)malloc(sizeof(char *) * (size_t)idx->n);
-    if (!cs->items) return 0;
+    *count = 0;
     for (i = 0; i < idx->n; i++) {
         const char *p = idx->items[i].path, *name = strrchr(p, '/');
-        char f[AC_MAX_PATH];
+        char f[AC_MAX_PATH], lname[AC_MAX_PATH];
         name = name ? name + 1 : p;
-        if ((int)strlen(name) <= name_max || case_skipped(cs, p)) continue;
+        cs_from_utf8(name, lname, sizeof(lname));   /* length on disk counts */
+        if ((int)strlen(lname) <= name_max || case_skipped(cs, p)) continue;
         ui_notify(UI_WARN, "'%s': Name laenger als %d Zeichen, hier nicht moeglich -- uebersprungen",
                   p, name_max);
         fold_case(f, sizeof(f), p);
-        if (!(cs->items[cs->n] = sync_dupstr(f))) return 0;
-        cs->n++;
+        if (!skips_add(cs, f)) return 0;
         (*count)++;
     }
     return 1;
@@ -292,8 +310,7 @@ static int find_case_collisions(const SyncIndex *idx, CaseSkips *cs)
         if (case_skipped(cs, v[i]->path)) continue;   /* already skipped (long name, earlier pair) */
         ui_notify(UI_WARN, "'%s' und '%s' unterscheiden sich nur in Gross-/Kleinschreibung -- "
                   "beide uebersprungen", v[i - 1]->path, v[i]->path);
-        if (!(cs->items[cs->n] = sync_dupstr(f))) { free(v); return 0; }
-        cs->n++;
+        if (!skips_add(cs, f)) { free(v); return 0; }
     }
     free(v);
     return 1;
@@ -322,6 +339,140 @@ static int mtimes_equal(long a, long b)
     return d <= 2;
 }
 
+/* ------------------------------------------------------------------ */
+/* Phase 4: names on disk vs. UTF-8 keys                                */
+/* ------------------------------------------------------------------ */
+
+/* The local form of a UTF-8 relative path: every component through
+ * cs_from_utf8(). Deterministic, so a lossy parent maps the same way for
+ * all its children. Returns 1 if exact (the way back gives utf8). */
+static int local_rel_of(const char *utf8, char *out, size_t outsz)
+{
+    char comp[AC_MAX_PATH], loc[AC_MAX_PATH];
+    const char *p = utf8;
+    size_t o = 0;
+    int exact = 1;
+    out[0] = '\0';
+    while (*p) {
+        const char *slash = strchr(p, '/');
+        size_t n = slash ? (size_t)(slash - p) : strlen(p);
+        if (n >= sizeof(comp)) n = sizeof(comp) - 1;
+        memcpy(comp, p, n); comp[n] = '\0';
+        if (!cs_from_utf8(comp, loc, sizeof(loc))) exact = 0;
+        if (o + strlen(loc) + 2 > outsz) return 0;
+        if (o) out[o++] = '/';
+        strcpy(out + o, loc);
+        o += strlen(loc);
+        p += n;
+        if (*p == '/') p++;
+    }
+    return exact;
+}
+
+/* Lossy names: a server name like "Preis\xE2\x82\xAC.txt" exists on an
+ * ISO-8859-1 disk as "Preis_.txt", whose way back is a different UTF-8
+ * name. Without help the next run would see "Preis_.txt" as a new local
+ * file (upload) and the original as deleted locally (delete on the
+ * server). The map ties such local forms back to their server names;
+ * it is built from the remote index and the baseline (a name that was
+ * deleted on the server must still be recognised locally). */
+typedef struct { char *l; char *p; } NameMapEntry;
+typedef struct { NameMapEntry *items; int n; } NameMap;
+
+static int nm_cmp(const void *a, const void *b)
+{
+    int c = strcmp(((const NameMapEntry *)a)->l, ((const NameMapEntry *)b)->l);
+    return c ? c : strcmp(((const NameMapEntry *)a)->p, ((const NameMapEntry *)b)->p);
+}
+
+static void namemap_free(NameMap *m)
+{
+    int i;
+    for (i = 0; i < m->n; i++) { free(m->items[i].l); free(m->items[i].p); }
+    free(m->items);
+    m->items = NULL; m->n = 0;
+}
+
+static int namemap_add(NameMap *m, int *cap, const char *path)
+{
+    char l[AC_MAX_PATH];
+    if (local_rel_of(path, l, sizeof(l))) return 1;   /* exact: needs no entry */
+    if (m->n == *cap) {
+        int nc = *cap ? *cap * 2 : 16;
+        NameMapEntry *t = (NameMapEntry *)realloc(m->items, sizeof(NameMapEntry) * (size_t)nc);
+        if (!t) return 0;
+        m->items = t; *cap = nc;
+    }
+    m->items[m->n].l = sync_dupstr(l);
+    m->items[m->n].p = sync_dupstr(path);
+    if (!m->items[m->n].l || !m->items[m->n].p) {
+        free(m->items[m->n].l); free(m->items[m->n].p);
+        return 0;
+    }
+    m->n++;
+    return 1;
+}
+
+/* Builds the map; two server names with the same local form (both
+ * lossy, or one exact and one lossy) cannot both live on this disk and
+ * are skipped like a case collision (S6). 0 on out of memory. */
+static int namemap_build(NameMap *m, const SyncIndex *ridx, const SyncState *base,
+                         CaseSkips *skips)
+{
+    int i, cap = 0, w;
+    for (i = 0; i < ridx->n; i++)
+        if (!namemap_add(m, &cap, ridx->items[i].path)) return 0;
+    for (i = 0; i < base->n; i++)
+        if (!namemap_add(m, &cap, base->items[i].path)) return 0;
+    if (!m->n) return 1;
+    qsort(m->items, (size_t)m->n, sizeof(NameMapEntry), nm_cmp);
+    for (i = 1, w = 1; i < m->n; i++) {   /* drop exact duplicates (remote + baseline) */
+        if (strcmp(m->items[i].l, m->items[w - 1].l) == 0 &&
+            strcmp(m->items[i].p, m->items[w - 1].p) == 0) {
+            free(m->items[i].l); free(m->items[i].p);
+            continue;
+        }
+        m->items[w++] = m->items[i];
+    }
+    m->n = w;
+    for (i = 0; i < m->n; i++) {
+        /* the same local form for different server names */
+        int clash = (i > 0 && strcmp(m->items[i].l, m->items[i - 1].l) == 0) ||
+                    (i + 1 < m->n && strcmp(m->items[i].l, m->items[i + 1].l) == 0);
+        /* ... or an exact server name that is this local form already:
+         * then both are skipped, they would share one file on disk */
+        char back[AC_MAX_PATH];
+        int k, exact_too = 0;
+        cs_to_utf8(m->items[i].l, back, sizeof(back));
+        for (k = 0; k < ridx->n && !exact_too; k++)
+            if (strcmp(ridx->items[k].path, back) == 0) exact_too = 1;
+        if (clash || exact_too) {
+            char f[AC_MAX_PATH];
+            ui_notify(UI_WARN, "'%s' laesst sich hier nicht eindeutig benennen -- uebersprungen",
+                      m->items[i].p);
+            fold_case(f, sizeof(f), m->items[i].p);
+            if (!case_skipped(skips, m->items[i].p) && !skips_add(skips, f)) return 0;
+            if (exact_too) {
+                fold_case(f, sizeof(f), back);
+                if (!case_skipped(skips, back) && !skips_add(skips, f)) return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static const char *namemap_find(const NameMap *m, const char *lrel)
+{
+    int lo = 0, hi = m->n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        int c = strcmp(m->items[mid].l, lrel);
+        if (c == 0) return m->items[mid].p;
+        if (c < 0) lo = mid + 1; else hi = mid - 1;
+    }
+    return NULL;
+}
+
 /* Local counterpart to index_remote_tree_sync() — purely local
  * traversal, effectively free. Works fine on AmigaOS too — dos.library
  * Lock() accepts ordinary multi-component "dir/sub/file" paths.
@@ -335,15 +486,15 @@ static int mtimes_equal(long a, long b)
  * failing local path in errpath -- an unreadable subtree would otherwise
  * look deleted locally and be deleted on the server (S1). */
 static int index_local_tree_sync(const char *local_root, const char *rel_prefix,
-                                 SyncIndex *idx, SyncState *baseline,
-                                 char *errpath, size_t errsz)
+                                 const char *lrel_prefix, SyncIndex *idx, SyncState *baseline,
+                                 const NameMap *map, char *errpath, size_t errsz)
 {
     LocalDir *d;
     LocalDirEntry e;
     char local_path[AC_MAX_PATH];
 
-    if (rel_prefix[0])
-        localfs_join(local_path, sizeof(local_path), local_root, rel_prefix);
+    if (lrel_prefix[0])
+        localfs_join(local_path, sizeof(local_path), local_root, lrel_prefix);
     else {
         strncpy(local_path, local_root, sizeof(local_path) - 1);
         local_path[sizeof(local_path) - 1] = '\0';
@@ -355,20 +506,31 @@ static int index_local_tree_sync(const char *local_root, const char *rel_prefix,
         return 0;
     }
     while (localfs_readdir(d, &e)) {
-        char relchild[AC_MAX_PATH];
+        char relchild[AC_MAX_PATH], lrelchild[AC_MAX_PATH], uname[AC_MAX_PATH];
         char md5hex[33];
+        const char *mapped;
         SyncStateEntry *cached;
-
-        if (rel_prefix[0])
-            snprintf(relchild, sizeof(relchild), "%s/%s", rel_prefix, e.name);
-        else {
-            strncpy(relchild, e.name, sizeof(relchild) - 1);
-            relchild[sizeof(relchild) - 1] = '\0';
-        }
 
         /* S13 -- includes our own baseline, its tempfile and the
          * leftover .part of an aborted download */
         if (sync_name_excluded(e.name)) continue;
+
+        /* the on-disk path, and its UTF-8 key: the server name it was
+         * made from if that was lossy (map), else the plain conversion */
+        if (lrel_prefix[0])
+            snprintf(lrelchild, sizeof(lrelchild), "%s/%s", lrel_prefix, e.name);
+        else
+            snprintf(lrelchild, sizeof(lrelchild), "%s", e.name);
+        mapped = namemap_find(map, lrelchild);
+        if (mapped) {
+            snprintf(relchild, sizeof(relchild), "%s", mapped);
+        } else {
+            cs_to_utf8(e.name, uname, sizeof(uname));
+            if (rel_prefix[0])
+                snprintf(relchild, sizeof(relchild), "%s/%s", rel_prefix, uname);
+            else
+                snprintf(relchild, sizeof(relchild), "%s", uname);
+        }
 
         md5hex[0] = '\0';
         if (!e.is_dir) {
@@ -378,14 +540,17 @@ static int index_local_tree_sync(const char *local_root, const char *rel_prefix,
                 md5hex[sizeof(md5hex) - 1] = '\0';
             } else {
                 char local_full[AC_MAX_PATH];
-                localfs_join(local_full, sizeof(local_full), local_root, relchild);
+                localfs_join(local_full, sizeof(local_full), local_root, lrelchild);
                 if (!md5_file_hex(local_full, md5hex)) md5hex[0] = '\0';
             }
         }
 
         if (!index_add(idx, relchild, e.is_dir, e.size, e.mtime, md5hex, NULL, 0, 0) ||
+            (strcmp(relchild, lrelchild) != 0 &&
+             !(idx->items[idx->n - 1].lrel = sync_dupstr(lrelchild))) ||
             (e.is_dir &&
-             !index_local_tree_sync(local_root, relchild, idx, baseline, errpath, errsz))) {
+             !index_local_tree_sync(local_root, relchild, lrelchild, idx, baseline, map,
+                                    errpath, errsz))) {
             if (!errpath[0]) snprintf(errpath, errsz, "%s (kein Speicher)", local_path);
             localfs_closedir(d);
             return 0;
@@ -870,9 +1035,9 @@ static void build_identity(char *out, size_t sz, const SyncTransport *t,
                            const char *remote_root, const SyncOptions *o)
 {
     const AcConfig *c = t->cfg;
-    snprintf(out, sz, "server=%s|user=%s|base=%s|root=%s|extra=%s",
+    snprintf(out, sz, "server=%s|user=%s|base=%s|root=%s|cs=%s|extra=%s",
              c ? c->server : "", c ? c->username : "", c ? c->basepath : "",
-             remote_root, (o && o->identity_extra) ? o->identity_extra : "");
+             remote_root, cs_name(), (o && o->identity_extra) ? o->identity_extra : "");
 }
 
 void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remote_root,
@@ -893,7 +1058,8 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     int         ri, li, bi, i, del_n;
     char        summary[256];
     char        errpath[AC_MAX_PATH];
-    CaseSkips   case_skips = { NULL, 0 };
+    CaseSkips   case_skips = { NULL, 0, 0 };
+    NameMap     namemap = { NULL, 0 };
     int         cp_actions = 0;   /* S11 checkpoint counters */
     long        cp_time;
     int         cp_every = SYNC_CHECKPOINT_ACTIONS;
@@ -997,8 +1163,16 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
         scan_ok = 1;   /* preview of a first sync: the root comes later */
     else
         scan_ok = index_remote_tree_sync(t, remote_root, "", &ridx, errpath, sizeof(errpath));
+    /* Phase 4: map lossy local names back to their server names */
+    if (scan_ok && !namemap_build(&namemap, &ridx, &old_st, &case_skips)) {
+        ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: kein Speicher");
+        out->errors++;
+        out->aborted = 1;
+        goto out_free;
+    }
     if (scan_ok)
-        scan_ok = index_local_tree_sync(local_root, "", &lidx, &old_st, errpath, sizeof(errpath));
+        scan_ok = index_local_tree_sync(local_root, "", "", &lidx, &old_st, &namemap,
+                                        errpath, sizeof(errpath));
     if (!scan_ok) {
         ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: %s nicht lesbar",
                   errpath[0] ? errpath : "(kein Speicher)");
@@ -1067,7 +1241,16 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
             continue;
         }
 
-        localfs_join(lpath, sizeof(lpath), local_root, cur);
+        /* the path on disk: as scanned, or the local form of the name */
+        if (le && le->lrel) {
+            localfs_join(lpath, sizeof(lpath), local_root, le->lrel);
+        } else if (le) {
+            localfs_join(lpath, sizeof(lpath), local_root, cur);
+        } else {
+            char lrel[AC_MAX_PATH];
+            local_rel_of(cur, lrel, sizeof(lrel));
+            localfs_join(lpath, sizeof(lpath), local_root, lrel);
+        }
         snprintf(rpath, sizeof(rpath), "%s/%s", remote_root, cur);
 
         if (le && re) {
@@ -1500,6 +1683,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
 
 out_free:
     case_skips_free(&case_skips);
+    namemap_free(&namemap);
     index_free(&ridx); index_free(&lidx);
     syncstate_free(&old_st);
     syncstate_free(&new_st);

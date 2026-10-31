@@ -25,6 +25,7 @@
 #include "ui_hooks.h"
 #include "progress.h"
 #include "fake_transport.h"
+#include "charset.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1455,6 +1456,136 @@ static void t_perf_8000(void)
     env_free(&e);
 }
 
+/* ===== charset.c (Phase 4) ===== */
+static void t_cs_nfc(void)
+{
+    char o[64];
+    CHECK(cs_nfc("a\xCC\x88", o, sizeof(o)) && strcmp(o, "\xC3\xA4") == 0);          /* a+U+0308 -> ä */
+    CHECK(cs_nfc("Cafe\xCC\x81!", o, sizeof(o)) && strcmp(o, "Caf\xC3\xA9!") == 0);   /* é */
+    CHECK(cs_nfc("U\xCC\x88\xCC\x84", o, sizeof(o)) && strcmp(o, "\xC7\x95") == 0);   /* Ü+macron -> U+01D5 */
+    CHECK(cs_nfc("s\xCC\x81", o, sizeof(o)) && strcmp(o, "\xC5\x9B") == 0);            /* ś (Polish) */
+    CHECK(cs_nfc("\xC3\xA4", o, sizeof(o)) && strcmp(o, "\xC3\xA4") == 0);             /* already NFC */
+    CHECK(cs_nfc("x\xCC\x88", o, sizeof(o)) && strcmp(o, "x\xCC\x88") == 0);           /* no composition */
+    CHECK(!cs_nfc("abcdef", o, 4));                                                     /* truncated */
+}
+
+static void t_cs_latin1(void)
+{
+    char o[64], u[64];
+    cs_test_mode(CS_TEST_LATIN1);
+    CHECK(strcmp(cs_name(), "ISO-8859-1") == 0);
+    CHECK(cs_from_utf8("Gr\xC3\xBC\xC3\x9F" "e.txt", o, sizeof(o)) == 1);
+    CHECK(strcmp(o, "Gr\xFC\xDF" "e.txt") == 0);
+    CHECK(cs_to_utf8(o, u, sizeof(u)) && strcmp(u, "Gr\xC3\xBC\xC3\x9F" "e.txt") == 0);
+    CHECK(cs_from_utf8("Preis\xE2\x82\xAC.txt", o, sizeof(o)) == 0);                    /* EUR: lossy */
+    CHECK(strcmp(o, "Preis_.txt") == 0);
+    CHECK(cs_from_utf8("a\xCC\x88", o, sizeof(o)) == 0 && strcmp(o, "\xE4") == 0);      /* NFD: not exact */
+    CHECK(cs_from_utf8("bad\xFFname", o, sizeof(o)) == 0 && strcmp(o, "bad_name") == 0); /* invalid UTF-8 */
+    CHECK(cs_from_utf8("plain", o, sizeof(o)) == 1 && strcmp(o, "plain") == 0);
+    cs_test_mode(CS_TEST_DEFAULT);
+}
+
+static void t_cs_utf8_default(void)
+{
+    char o[64];
+    CHECK(strcmp(cs_name(), "UTF-8") == 0);
+    CHECK(cs_from_utf8("Gr\xC3\xBC\xC3\x9F" "e", o, sizeof(o)) == 1);
+    CHECK(cs_from_utf8("a\xCC\x88", o, sizeof(o)) == 0 && strcmp(o, "\xC3\xA4") == 0);
+    CHECK(cs_to_utf8("a\xCC\x88", o, sizeof(o)) && strcmp(o, "\xC3\xA4") == 0);          /* local NFD -> NFC */
+}
+
+/* ===== Phase 4 in the kernel, with an ASCII "local codeset" =====
+ * (real Latin-1 bytes are not allowed in APFS names; ASCII makes every
+ * non-ASCII character lossy, which is exactly what has to be tested) */
+#define EUR "\xE2\x82\xAC"
+#define UE  "\xC3\xBC"
+#define SZ  "\xC3\x9F"
+
+static void t_cs_lossy_sync(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    cs_test_mode(CS_TEST_ASCII);
+    fake_put_data(&e.f, rp(&e, "Preis" EUR ".txt"), "euro", T0);
+    fake_put_data(&e.f, rp(&e, "Gr" UE SZ "e/brief.txt"), "brief", T0);
+    fake_put_data(&e.f, rp(&e, "plain.txt"), "plain", T0);
+    run(&e);
+    CHECK_EQ(e.s.downloaded, 3);
+    CHECK(lhas(&e, "Preis_.txt", "euro"));
+    CHECK(lhas(&e, "Gr__e/brief.txt", "brief"));
+    check_idle(&e);
+    check_idle(&e);
+    CHECK(fake_find(&e.f, rp(&e, "Preis_.txt")) == NULL);
+    lw(&e, "Preis_.txt", "euro neu", T0 + 100);       /* edit under the local form */
+    run(&e);
+    CHECK_EQ(e.s.uploaded, 1);
+    CHECK(fake_has(&e.f, rp(&e, "Preis" EUR ".txt"), "euro neu"));
+    CHECK(fake_find(&e.f, rp(&e, "Preis_.txt")) == NULL);
+    fake_remove(&e.f, rp(&e, "Gr" UE SZ "e/brief.txt"));   /* deleted on the server */
+    run(&e);
+    CHECK(!lexists(&e, "Gr__e/brief.txt"));
+    CHECK(fake_find(&e.f, rp(&e, "Gr__e")) == NULL);
+    lw(&e, "Gr__e/neu.txt", "neu lokal", T0 + 200);  /* new file in a lossy directory */
+    run(&e);
+    CHECK(fake_has(&e.f, rp(&e, "Gr" UE SZ "e/neu.txt"), "neu lokal"));
+    check_idle(&e);
+    cs_test_mode(CS_TEST_DEFAULT);
+    env_free(&e);
+}
+static void t_cs_lossy_ac(void)  { t_cs_lossy_sync(FAKE_AMICLOUD); }
+static void t_cs_lossy_dav(void) { t_cs_lossy_sync(FAKE_WEBDAV); }
+
+/* two server names with the same local form: both skipped, nothing lost */
+static void t_cs_clash(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    cs_test_mode(CS_TEST_ASCII);
+    fake_put_data(&e.f, rp(&e, "a" EUR ".txt"), "euro", T0);
+    fake_put_data(&e.f, rp(&e, "a" UE ".txt"), "ue", T0);
+    fake_put_data(&e.f, rp(&e, "b" EUR ".txt"), "b-euro", T0);
+    fake_put_data(&e.f, rp(&e, "b_.txt"), "b-plain", T0);
+    fake_put_data(&e.f, rp(&e, "ok.txt"), "ok", T0);
+    run(&e);
+    run(&e);
+    CHECK(lhas(&e, "ok.txt", "ok"));
+    CHECK(!lexists(&e, "a_.txt"));
+    CHECK(!lexists(&e, "b_.txt"));
+    CHECK(e.s.conflicts > 0);
+    CHECK_EQ(e.f.calls[FOP_PUT] + e.f.calls[FOP_DEL], 0);
+    CHECK(fake_has(&e.f, rp(&e, "a" EUR ".txt"), "euro"));
+    CHECK(fake_has(&e.f, rp(&e, "a" UE ".txt"), "ue"));
+    CHECK(fake_has(&e.f, rp(&e, "b" EUR ".txt"), "b-euro"));
+    CHECK(fake_has(&e.f, rp(&e, "b_.txt"), "b-plain"));
+    cs_test_mode(CS_TEST_DEFAULT);
+    env_free(&e);
+}
+
+/* a decomposed (NFD) server name from a Mac: stored composed locally,
+ * recognised again, not uploaded a second time */
+static void t_cs_nfd_name(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    fake_put_data(&e.f, rp(&e, "Mu\xCC\x88sli.txt"), "nfd", T0);
+    run(&e);
+    CHECK_EQ(e.s.downloaded, 1);
+    check_idle(&e);
+    CHECK(fake_find(&e.f, rp(&e, "M\xC3\xBCsli.txt")) == NULL);
+    env_free(&e);
+}
+
+/* the codeset is part of the identity: switching it starts over */
+static void t_cs_identity(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "a", T0);
+    run(&e);
+    cs_test_mode(CS_TEST_ASCII);
+    run(&e);
+    CHECK_EQ(e.s.deleted, 0);
+    CHECK(lhas(&e, "a.txt", "a"));
+    cs_test_mode(CS_TEST_DEFAULT);
+    env_free(&e);
+}
+
 /* ------------------------------------------------------------------ */
 typedef struct { const char *name; void (*fn)(void); const char *risk; } Test;
 
@@ -1513,6 +1644,14 @@ static const Test tests[] = {
     { "Pruefung: WebDAV-Ordner bekommt waehrend des Laufs Neues", t_dir_delete_race_dav, NULL },
     { "Pruefung: lokales Laufwerk fehlt",            t_local_parent_missing, NULL },
     { "Pruefung: 8000 Dateien",                      t_perf_8000, NULL },
+    { "Zeichensatz: NFC",                            t_cs_nfc, NULL },
+    { "Zeichensatz: Latin-1",                        t_cs_latin1, NULL },
+    { "Zeichensatz: UTF-8 (PC)",                     t_cs_utf8_default, NULL },
+    { "Zeichensatz: verlustbehaftete Namen (AmiCloud)", t_cs_lossy_ac, NULL },
+    { "Zeichensatz: verlustbehaftete Namen (WebDAV)",   t_cs_lossy_dav, NULL },
+    { "Zeichensatz: gleiche lokale Form",            t_cs_clash, NULL },
+    { "Zeichensatz: NFD-Name vom Mac",               t_cs_nfd_name, NULL },
+    { "Zeichensatz: Wechsel = neuer Stand",          t_cs_identity, NULL },
     { "kaputter Stand (AmiCloud)",                   t_corrupt_baseline_ac, NULL },
     { "AmiCloud: Ordner-Loeschen behaelt neue Datei", t_ac_dir_delete_keeps_new_file, NULL },
     { "S2: Abbruch mitten im Lauf",                  t_break_mid_run, NULL },

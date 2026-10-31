@@ -30,7 +30,7 @@ CFLAGS  = $(TARGET) -O2 -DAMIGA -DPLATFORM_AMIGA -I$(INCDIR) \
           -I$(NDK_INC) -I$(RUNTIME_INC) -cpu=$(CPU)
 
 OBJDIR = obj/amiga
-SRCS   = config base64 parson md5 ui_hooks cloudtime progress wbstartup
+SRCS   = config base64 parson md5 ui_hooks cloudtime progress wbstartup charset
 OBJS   = $(SRCS:%=$(OBJDIR)/%.o)
 
 all: $(OBJDIR) $(OBJS)

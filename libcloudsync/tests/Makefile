@@ -23,7 +23,7 @@ SRCS = test_sync.c fake_transport.c \
        ../src/sync.c ../src/syncstate.c \
        $(ROOT)/libcloudcore/src/md5.c $(ROOT)/libcloudcore/src/parson.c \
        $(ROOT)/libcloudcore/src/ui_hooks.c $(ROOT)/libcloudcore/src/progress.c \
-       $(ROOT)/libcloudcore/src/cloudtime.c \
+       $(ROOT)/libcloudcore/src/cloudtime.c $(ROOT)/libcloudcore/src/charset.c \
        $(ROOT)/libcloudfs/src/localfs_pc.c $(ROOT)/libcloudfs/src/localfs_util.c
 
 OBJDIR = obj
