@@ -3,8 +3,8 @@
 #
 # Host unit tests for the sync kernel (test_sync.c + fake_transport.c).
 # Compiles the kernel sources directly, with AddressSanitizer and
-# UndefinedBehaviorSanitizer, and links stubs.c instead of libcloudhttp,
-# so no libcurl is needed.
+# UndefinedBehaviorSanitizer; the kernel needs no libcloudhttp, so no
+# libcurl either.
 #
 #   make            build and run all tests
 #   make run T=...  only tests whose name contains ...
@@ -19,7 +19,7 @@ INC      = -I. -I../include/cloudsync -I$(ROOT)/libcloudcore/include/cloudcore \
 CFLAGS   = -std=c99 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -g -O1 -Wall -Wextra $(SAN) $(INC)
 LDFLAGS  = $(SAN)
 
-SRCS = test_sync.c fake_transport.c stubs.c \
+SRCS = test_sync.c fake_transport.c \
        ../src/sync.c ../src/syncstate.c \
        $(ROOT)/libcloudcore/src/md5.c $(ROOT)/libcloudcore/src/parson.c \
        $(ROOT)/libcloudcore/src/ui_hooks.c $(ROOT)/libcloudcore/src/progress.c \

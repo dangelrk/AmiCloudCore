@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright (C) 2026 Ronny Krueger
  *
- * test_sync.c -- host unit tests for the sync kernel (cloudsync_run_t)
+ * test_sync.c -- host unit tests for the sync kernel (cloudsync_run_ex)
  * against an in-memory FakeTransport (fake_transport.h) and a real
  * temporary local directory.
  *
@@ -191,7 +191,13 @@ static void run_root(Env *e, const char *remote_root, int dry)
         dup2(devnull, 1);
         close(devnull);
     }
-    cloudsync_run_t(&e->f.t, e->local, remote_root, dry, 1, &pr, &e->s);
+    {
+        SyncOptions o;
+        sync_options_init(&o);
+        o.dry_run = dry;
+        o.verbose = 1;
+        cloudsync_run_ex(&e->f.t, e->local, remote_root, &o, &pr, &e->s);
+    }
     fflush(stdout);
     if (saved >= 0) { dup2(saved, 1); close(saved); }
 }
@@ -799,6 +805,49 @@ static void r_identity_change_deletes_local(void)
     env_free(&e);
 }
 
+/* S3: a baseline in another format (or the old one without a format
+ * number) is discarded: first sync, nothing deleted */
+static void t_foreign_format(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "alpha", T0);
+    lw(&e, SYNCSTATE_FILE, "{ \"global_revision\": 1, \"entries\": [ { \"path\": \"gone.txt\", "
+       "\"is_dir\": false, \"md5\": \"x\" } ] }", T0);
+    fake_put_data(&e.f, rp(&e, "gone.txt"), "remote only", T0);
+    run(&e);
+    CHECK_EQ(e.s.deleted, 0);
+    CHECK(lhas(&e, "gone.txt", "remote only"));
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "alpha"));
+    env_free(&e);
+}
+
+/* S4: with a baseline, a vanished remote root is not recreated empty
+ * (which would delete everything locally) -- the run stops */
+static void t_remote_root_gone(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "precious", T0);
+    run(&e);
+    fake_remove(&e.f, e.remote);
+    run(&e);
+    CHECK(e.s.aborted);
+    CHECK(lhas(&e, "a.txt", "precious"));
+    CHECK(fake_find(&e.f, e.remote) == NULL);
+    env_free(&e);
+}
+
+/* a dry run of a new pair whose remote folder does not exist yet */
+static void t_dry_run_new_pair(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "alpha", T0);
+    run_dry(&e);
+    CHECK(!e.s.aborted);
+    CHECK_EQ(e.s.uploaded, 1);
+    CHECK(fake_find(&e.f, e.remote) == NULL);
+    env_free(&e);
+}
+
 /* S2: Ctrl-C / Abbrechen is never checked -- a pending break still runs
  * every transfer. */
 static void r_break_ignored(void)
@@ -1008,7 +1057,10 @@ static const Test tests[] = {
     { "S1: list-Fehler bricht ab (AmiCloud)", r_list_error_deletes_local_ac,  NULL },
     { "S1: unlesbarer lokaler Ordner bricht ab",    r_opendir_error_deletes_remote, NULL },
     { "WebDAV-Ordner-Loeschen nimmt neue Datei mit",     r_dav_dir_delete_takes_new_file, "S5" },
-    { "anderer Server-Ordner loescht lokale Dateien",    r_identity_change_deletes_local, "S3" },
+    { "S3: anderer Server-Ordner loescht nichts",       r_identity_change_deletes_local, NULL },
+    { "S3: fremdes Stand-Format wird verworfen",        t_foreign_format, NULL },
+    { "S4: verschwundene Server-Wurzel bricht ab",      t_remote_root_gone, NULL },
+    { "Probelauf eines neuen Paars ohne Server-Ordner", t_dry_run_new_pair, NULL },
     { "S2: Abbruch vor dem Lauf",                          r_break_ignored,                NULL },
     { "Gross/Klein-Kollision",                           r_case_collision,               "S6" },
     { "S9: fremde Aenderung waehrend des Laufs",        r_global_rev_at_end,            NULL },

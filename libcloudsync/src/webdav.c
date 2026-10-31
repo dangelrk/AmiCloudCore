@@ -2,7 +2,7 @@
  * Copyright (C) 2026 Ronny Krueger
  */
 /*
- * webdav.c — see webdav.h. Standard WebDAV transport for cloudsync_run_t
+ * webdav.c — see webdav.h. Standard WebDAV transport for cloudsync_run_ex
  * (PROPFIND/GET/PUT/MKCOL/DELETE, RFC 4918), talking to a plain OwnCloud/
  * Nextcloud server. No AmiCloud/api.php code is reachable from here, and
  * none of this file is reachable from cmd.c/api.php's own callers either

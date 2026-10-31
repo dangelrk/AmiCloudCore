@@ -11,16 +11,12 @@
  * apart from "new on the other side" and resolved every content
  * conflict by mtime instead of ever reporting one.
  *
- * Transport-neutral since the WebDAV/OwnCloud work (see transport.h):
- * the reconcile kernel below (cloudsync_run_t and everything it calls)
- * never touches cmd.h/api.php directly -- it only ever calls through a
- * SyncTransport. cmd.h is included below solely to build the small
- * amicloud_* adapter functions at the bottom of this file, which give
- * the original cloudsync_run() its AmiCloud (api.php) transport so every
- * existing caller keeps working unchanged.
+ * Transport-neutral (see transport.h): the reconcile kernel below
+ * (cloudsync_run_ex and everything it calls) only ever calls through a
+ * SyncTransport -- amicloud_transport.c (api.php) and webdav.c are the
+ * backends.
  */
 #include "sync.h"
-#include "cmd.h"
 #include "http.h" /* ac_log_printf() -- see the out->errors++ sites below */
 #include "localfs.h"
 #include "ui_hooks.h"
@@ -176,7 +172,7 @@ static int index_remote_tree_sync(SyncTransport *t, const char *remote_root,
     return 1;
 }
 
-/* Delta-optimisation fast path (see cloudsync_run()): when the server's
+/* Delta-optimisation fast path (see cloudsync_run_ex()): when the server's
  * global_revision hasn't moved since our last successful sync, the
  * remote tree is by definition identical to what it was back then --
  * reuse the baseline itself as the remote index instead of a full
@@ -449,9 +445,38 @@ static int del_ptr_cmp(const void *a, const void *b)
     return strcmp(bb->relpath, aa->relpath);
 }
 
-void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remote_root,
-                     int dry_run, int verbose, Progress *pr, SyncSummary *out)
+/* 1 if remote_root can be listed (only used for a dry first sync) */
+static int remote_root_exists(SyncTransport *t, const char *remote_root)
 {
+    SyncRemoteEntry *e = NULL;
+    int n = 0, ok = t->list(t, remote_root, &e, &n);
+    free(e);
+    return ok;
+}
+
+void sync_options_init(SyncOptions *o)
+{
+    memset(o, 0, sizeof(*o));
+}
+
+/* S3: which pair a baseline belongs to. The server URL, user and base
+ * path come from the transport's config (NULL in the unit tests), the
+ * remote root from the caller, anything else (codeset) from the options. */
+static void build_identity(char *out, size_t sz, const SyncTransport *t,
+                           const char *remote_root, const SyncOptions *o)
+{
+    const AcConfig *c = t->cfg;
+    snprintf(out, sz, "server=%s|user=%s|base=%s|root=%s|extra=%s",
+             c ? c->server : "", c ? c->username : "", c ? c->basepath : "",
+             remote_root, (o && o->identity_extra) ? o->identity_extra : "");
+}
+
+void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remote_root,
+                      const SyncOptions *opts, Progress *pr, SyncSummary *out)
+{
+    SyncOptions defaults;
+    int         dry_run, verbose;
+    char        identity[AC_MAX_PATH + 512];
     SyncState   old_st, new_st;
     SyncIndex   ridx, lidx;
     SyncActions acts;
@@ -465,6 +490,9 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
     char        summary[256];
     char        errpath[AC_MAX_PATH];
 
+    if (!opts) { sync_options_init(&defaults); opts = &defaults; }
+    dry_run = opts->dry_run;
+    verbose = opts->verbose;
     memset(out, 0, sizeof(*out));
     now = (long)time(NULL);
     actions_init(&acts);
@@ -483,15 +511,42 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
     ac_log_printf("sync: %s <-> %s%s\n", local_root, remote_root,
                   dry_run ? " (Probelauf)" : "");
 
-    /* Both sides auto-created if missing (like get -r/put -r already do)
-     * -- but never in a dry run, which must never touch anything. */
-    if (!dry_run) {
-        localfs_mkdir_p(local_root);
-        t->mkdir_quiet(t, remote_root);
+    if (!syncstate_load(local_root, &old_st)) {
+        ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: kein Speicher fuer %s",
+                  SYNCSTATE_FILE);
+        out->errors++;
+        out->aborted = 1;
+        goto out_free;
     }
 
-    syncstate_load(local_root, &old_st);
+    /* S3: a baseline of another server, user or remote folder is
+     * discarded -- this run then counts as a first sync, which merges
+     * both sides and never deletes. */
+    build_identity(identity, sizeof(identity), t, remote_root, opts);
+    if (old_st.identity && strcmp(old_st.identity, identity) != 0) {
+        ui_notify(UI_WARN, "Abgleichstand gehoert zu einem anderen Server oder Ordner -- "
+                  "Erstabgleich, es wird nichts geloescht");
+        ac_log_printf("sync: Stand verworfen (%s statt %s)\n", old_st.identity, identity);
+        syncstate_free(&old_st);
+        old_st.had_conflicts = 0;
+    }
+    if (!syncstate_set_identity(&new_st, identity)) {
+        ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: kein Speicher");
+        out->errors++;
+        out->aborted = 1;
+        goto out_free;
+    }
     qsort(old_st.items, (size_t)old_st.n, sizeof(SyncStateEntry), syncstate_entry_cmp);
+
+    /* Both sides are created if missing -- never in a dry run. S4: with a
+     * baseline the remote root is expected to exist; if it is gone (e.g.
+     * renamed on the server), recreating it empty would make every local
+     * file look deleted remotely. Its listing then fails and the run stops
+     * (S1). The local root needs no such check: the baseline lives in it. */
+    if (!dry_run) {
+        localfs_mkdir_p(local_root);
+        if (old_st.n == 0) t->mkdir_quiet(t, remote_root);
+    }
 
     /* Delta optimisation: if the server's global revision hasn't moved
      * since our last successful sync, nothing changed remotely -- skip
@@ -505,7 +560,7 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
      * reusing the baseline as-if-live would risk silently "resolving"
      * the conflict by trusting stale data -- see report_conflict(). */
     status_ok = t->global_rev(t, &server_global);
-    use_baseline_as_remote = status_ok && !old_st.had_conflicts &&
+    use_baseline_as_remote = status_ok && !old_st.had_conflicts && old_st.n > 0 &&
                             (server_global == old_st.global_revision);
 
     /* S1: both trees must be scanned completely, or nothing happens at
@@ -513,6 +568,8 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
     errpath[0] = '\0';
     if (use_baseline_as_remote)
         scan_ok = index_remote_from_baseline(&old_st, &ridx);
+    else if (dry_run && old_st.n == 0 && !remote_root_exists(t, remote_root))
+        scan_ok = 1;   /* preview of a first sync: the root comes later */
     else
         scan_ok = index_remote_tree_sync(t, remote_root, "", &ridx, errpath, sizeof(errpath));
     if (scan_ok)
@@ -911,104 +968,4 @@ out_free:
     }
     ui_notify(UI_INFO, "%s", summary);
     ac_log_printf("sync: %s\n", summary);
-}
-
-/* ------------------------------------------------------------------ */
-/* AmiCloud (api.php) transport -- adapts the existing cmd_*() calls to   */
-/* SyncTransport, purely so the original cloudsync_run() below can keep   */
-/* every caller working unchanged. Not a new feature, not part of any     */
-/* public header -- this repo's own AmiCloud server/commodity is a         */
-/* separate, later deliverable that this WebDAV work does not touch.      */
-/* ------------------------------------------------------------------ */
-
-static int amicloud_list(SyncTransport *t, const char *remote_path,
-                         SyncRemoteEntry **out, int *out_n)
-{
-    AcEntry *entries;
-    int n, i;
-
-    *out = NULL; *out_n = 0;
-    if (!cmd_list_raw(t->cfg, remote_path, &entries, &n)) return 0;
-
-    if (n > 0) {
-        SyncRemoteEntry *arr = (SyncRemoteEntry *)calloc((size_t)n, sizeof(SyncRemoteEntry));
-        if (!arr) { cmd_entries_free(entries); return 0; }
-        for (i = 0; i < n; i++) {
-            strncpy(arr[i].name, entries[i].name, sizeof(arr[i].name) - 1);
-            arr[i].is_dir   = entries[i].is_dir;
-            arr[i].size     = entries[i].size;
-            arr[i].mtime    = entries[i].mtime;
-            /* AmiCloud provides a real content hash -- populate both
-             * md5 (compared against local hashes/no-baseline checks) and
-             * token (compared against the baseline's remembered remote
-             * marker) with it; see transport.h/syncstate.h for why these
-             * two roles must stay independently populated in general. */
-            strncpy(arr[i].md5, entries[i].md5, sizeof(arr[i].md5) - 1);
-            strncpy(arr[i].token, entries[i].md5, sizeof(arr[i].token) - 1);
-            arr[i].revision = entries[i].revision;
-            arr[i].id       = entries[i].id;
-        }
-        *out = arr;
-    }
-    *out_n = n;
-    cmd_entries_free(entries);
-    return 1;
-}
-
-static int amicloud_get(SyncTransport *t, const char *remote_path, const char *local_path,
-                        const char *display_name)
-{
-    return cmd_get_named(t->cfg, remote_path, local_path, display_name);
-}
-
-/* Two internal requests, exactly like the pre-refactor code: setdate's
- * return value is deliberately ignored (fire-and-forget), unchanged
- * behaviour. */
-static int amicloud_put(SyncTransport *t, const char *local_path,
-                        const char *remote_path, long mtime)
-{
-    int rc = cmd_put(t->cfg, local_path, remote_path);
-    if (rc == 0) cmd_setdate_mtime(t->cfg, remote_path, mtime);
-    return rc;
-}
-
-static int amicloud_del(SyncTransport *t, const char *remote_path)
-{
-    return cmd_del(t->cfg, remote_path);
-}
-
-static int amicloud_mkdir_quiet(SyncTransport *t, const char *remote_path)
-{
-    return cmd_mkdir_quiet(t->cfg, remote_path);
-}
-
-static int amicloud_setdate(SyncTransport *t, const char *remote_path, long mtime)
-{
-    return cmd_setdate_mtime(t->cfg, remote_path, mtime);
-}
-
-static int amicloud_global_rev(SyncTransport *t, long *global_out)
-{
-    return cmd_status(t->cfg, NULL, 0, global_out);
-}
-
-/* Original entry point -- see sync.h. Builds the AmiCloud transport
- * above and hands off to the transport-neutral kernel; signature and
- * behaviour are exactly what every existing caller already expects. */
-void cloudsync_run(const AcConfig *cfg, const char *local_root, const char *remote_root,
-                   int dry_run, int verbose, Progress *pr, SyncSummary *out)
-{
-    SyncTransport t;
-
-    t.cfg         = cfg;
-    t.list        = amicloud_list;
-    t.get         = amicloud_get;
-    t.put         = amicloud_put;
-    t.del         = amicloud_del;
-    t.mkdir_quiet = amicloud_mkdir_quiet;
-    t.setdate     = amicloud_setdate;
-    t.global_rev  = amicloud_global_rev;
-    t.close       = NULL;
-
-    cloudsync_run_t(&t, local_root, remote_root, dry_run, verbose, pr, out);
 }

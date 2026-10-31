@@ -36,7 +36,7 @@ CFLAGS   = $(TARGET) -O2 -DAMIGA -DPLATFORM_AMIGA \
            -cpu=$(CPU)
 
 OBJDIR = obj/amiga
-SRCS   = sync syncstate webdav
+SRCS   = sync syncstate webdav amicloud_transport
 OBJS   = $(SRCS:%=$(OBJDIR)/%.o)
 
 all: $(OBJDIR) $(OBJS)

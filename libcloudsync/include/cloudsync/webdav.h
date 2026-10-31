@@ -6,7 +6,7 @@
 
 /*
  * webdav.h — standard WebDAV transport (RFC 4918 PROPFIND/GET/PUT/MKCOL/
- * DELETE) for cloudsync_run_t()'s SyncTransport interface (transport.h).
+ * DELETE) for cloudsync_run_ex()'s SyncTransport interface (transport.h).
  *
  * This is the ONLY backend this tool ships with: it talks to a plain
  * OwnCloud/Nextcloud server and nothing else -- there is no companion

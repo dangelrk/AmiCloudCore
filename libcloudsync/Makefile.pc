@@ -27,7 +27,7 @@ ARFLAGS = rcs
 OBJDIR = obj/pc
 LIBDIR ?= ../../lib/pc
 
-SRCS = sync syncstate webdav
+SRCS = sync syncstate webdav amicloud_transport
 OBJS = $(SRCS:%=$(OBJDIR)/%.o)
 
 LIB = $(LIBDIR)/libcloudsync.a

@@ -31,6 +31,19 @@ static void state_init(SyncState *st)
     st->cap = 0;
     st->global_revision = 0;
     st->had_conflicts = 0;
+    st->identity = NULL;
+}
+
+int syncstate_set_identity(SyncState *st, const char *id)
+{
+    char *copy = NULL;
+    if (id) {
+        copy = ss_dupstr(id);
+        if (!copy) return 0;
+    }
+    free(st->identity);
+    st->identity = copy;
+    return 1;
 }
 
 int syncstate_load(const char *local_root, SyncState *st)
@@ -48,7 +61,15 @@ int syncstate_load(const char *local_root, SyncState *st)
     if (!root_val) return 1; /* no baseline yet -- first sync, not an error */
 
     root = json_value_get_object(root_val);
-    if (!root) { json_value_free(root_val); return 1; }
+    if (!root || (int)json_object_get_number(root, "format") != SYNCSTATE_FORMAT) {
+        json_value_free(root_val);   /* other format: start over, no migration */
+        return 1;
+    }
+    if (json_object_get_string(root, "identity") &&
+        !syncstate_set_identity(st, json_object_get_string(root, "identity"))) {
+        json_value_free(root_val);
+        return 0;
+    }
 
     st->global_revision = (long)json_object_get_number(root, "global_revision");
     st->had_conflicts   = (json_object_get_boolean(root, "had_conflicts") == 1);
@@ -98,6 +119,8 @@ int syncstate_save(const char *local_root, const SyncState *st)
     root_val = json_value_init_object();
     if (!root_val) return 0;
     root = json_value_get_object(root_val);
+    json_object_set_number (root, "format", SYNCSTATE_FORMAT);
+    if (st->identity) json_object_set_string(root, "identity", st->identity);
     json_object_set_number (root, "global_revision", (double)st->global_revision);
     json_object_set_boolean(root, "had_conflicts", st->had_conflicts);
 
@@ -202,4 +225,6 @@ void syncstate_free(SyncState *st)
     st->items = NULL;
     st->n = st->cap = 0;
     st->global_revision = 0;
+    free(st->identity);
+    st->identity = NULL;
 }

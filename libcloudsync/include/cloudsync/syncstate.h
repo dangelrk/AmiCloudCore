@@ -8,7 +8,7 @@
  * syncstate.h -- persistent last-sync baseline (AmiOwnCloud docs/design/
  * 07_Sync_Metadaten.md's "Lokale Sync-Datenbank"), stored as JSON in
  * <local_root>/.amicloudsync. This is the missing piece that lets
- * cloudsync_run() tell "deleted since the last sync" apart from "never
+ * cloudsync_run_ex() tell "deleted since the last sync" apart from "never
  * existed" -- see sync.c's 3-way decision matrix.
  *
  * Own struct, not libcloudcore's AcEntry/AcChange (module-encapsulation
@@ -19,6 +19,11 @@
 #include <stddef.h>
 
 #define SYNCSTATE_FILE ".amicloudsync"
+/* Format of the baseline file. A file with another (or no) format number
+ * is discarded on load -- the run then counts as a first sync, which only
+ * merges and never deletes. No migration: bump this whenever the meaning
+ * of a field changes. */
+#define SYNCSTATE_FORMAT 2
 /* A download in progress lands here (same directory as its target) and
  * only replaces the target once complete -- a broken-off transfer must
  * never leave a half file where the next sync would see a local edit
@@ -66,11 +71,17 @@ typedef struct {
      * must be disabled -- forcing one full rescan -- for as long as this
      * flag is set, i.e. until every conflict is resolved. */
     int had_conflicts;
+    /* Which pair this baseline belongs to (server, user, remote root, ...;
+     * built by sync.c), malloc'd, NULL if unknown. A baseline with another
+     * identity must never be used: its entries would make every file of
+     * the new pair look deleted (S3). */
+    char *identity;
 } SyncState;
 
 /* Loads <local_root>/.amicloudsync. A missing file is not an error -- it
  * means "no baseline yet" (first sync of this pair) and yields an empty,
- * zeroed *st. Returns 1 on success (including the missing-file case), 0
+ * zeroed *st; so does a file with another SYNCSTATE_FORMAT or that cannot
+ * be parsed. Returns 1 on success (including the missing-file case), 0
  * only on an unexpected allocation failure. */
 int syncstate_load(const char *local_root, SyncState *st);
 
@@ -90,6 +101,10 @@ SyncStateEntry *syncstate_find(SyncState *st, const char *path);
 void syncstate_upsert(SyncState *st, const char *path, int is_dir, long size, long mtime,
                       const char *md5, const char *token,
                       long revision, long server_id, long last_sync);
+
+/* Replaces st->identity with a copy of id (NULL clears it). 0 on out of
+ * memory. */
+int syncstate_set_identity(SyncState *st, const char *id);
 
 /* Removes the entry for path, if present. Order of the remaining entries
  * is not preserved. */

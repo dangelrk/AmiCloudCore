@@ -6,7 +6,7 @@
 
 /*
  * transport.h — the sync engine's own transport-neutral view of "a
- * remote store", extracted so cloudsync_run_t() (sync.h) never calls a
+ * remote store", extracted so cloudsync_run_ex() (sync.h) never calls a
  * cmd_*() function (AmiCloud's api.php REST client, libcloudhttp/cmd.h)
  * directly. Two things motivated this:
  *

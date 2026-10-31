@@ -18,14 +18,9 @@
  * libcloudcore (module-encapsulation rule) — nothing outside this lib
  * needs to know sync's decision-matrix internals.
  *
- * transport.h split the actual reconcile kernel (cloudsync_run_t) away
- * from any one wire protocol, so a second backend (WebDAV, see
- * webdav.h) can reuse the identical 3-way-merge/baseline logic without
- * this repo's own AmiCloud server (api.php) entering the picture at
- * all -- see transport.h's own comment for why. cloudsync_run() is now
- * just a one-line wrapper kept for source compatibility with every
- * existing caller (AmiCloud's apps/amicloud-sync CLI): same signature, same
- * behaviour, unchanged.
+ * transport.h keeps the reconcile kernel (cloudsync_run_ex) independent
+ * of any wire protocol: amicloud_transport.h (api.php) and webdav.h
+ * (ownCloud/Nextcloud) are the two backends.
  */
 
 #include "amicloud.h"
@@ -40,40 +35,43 @@ typedef struct {
     int aborted;
 } SyncSummary;
 
-/* Reconciles local_root and remote_root via a 3-way diff against
- * syncstate.h's persistent baseline (see sync.c for the full decision
- * matrix): a path changed on only one side transfers unambiguously in
+/* Options of one run. Initialise with sync_options_init() and change
+ * only what you need -- new fields always get a safe default there. */
+typedef struct {
+    /* Scan and decide only: nothing changes on either side, the baseline
+     * file included. */
+    int dry_run;
+    /* 1: a ui_notify() line per action (CLI). 0: only warnings, errors
+     * and the final tally (commodity, GUI). */
+    int verbose;
+    /* Extra identity of this pair, stored in the baseline next to the
+     * server, user and remote root the kernel takes from the transport
+     * (S3); e.g. the local codeset. NULL = none. */
+    const char *identity_extra;
+} SyncOptions;
+
+void sync_options_init(SyncOptions *o);
+
+/* Reconciles local_root and remote_root through transport t via a 3-way
+ * diff against syncstate.h's persistent baseline (see sync.c for the
+ * full decision matrix): a path changed on only one side transfers in
  * that direction; unchanged on both sides just gets 2s-tolerant mtime
  * alignment; changed identically on both sides converges silently;
- * genuinely different content on both sides is an unresolvable conflict
- * that's skipped and reported, never resolved by mtime. A path that
- * disappeared from one live side but matches its last-synced state on
- * the other is recognised as a real deletion and propagated, rather than
- * recreated as if new -- the baseline is what makes that distinction
- * possible at all.
+ * different content on both sides is a conflict that is skipped and
+ * reported, never resolved by mtime. A path that disappeared from one
+ * side but matches its last-synced state on the other is a deletion and
+ * is propagated.
  *
- * verbose=1 emits the original shell do_sync()'s per-action ui_notify()
- * lines (banner / dry-run preview / conflict warnings); verbose=0 (a
- * future commodity/GUI caller) stays silent except the one always-
- * emitted final tally line. pr is caller-owned (reset internally at the
- * start of the execute pass) so a caller can point a live progress
- * display at it during a real (non-dry) run. dry_run performs the full
- * scan/decision pass and fills *out but changes nothing on either side,
- * including the baseline file itself.
+ * Safety (AmiCloud docs/design/desktop-sync-plan.md, section 3): a scan
+ * error or out of memory aborts before anything changes (S1); a break
+ * (Ctrl-C) stops between actions and never deletes (S2); a baseline that
+ * belongs to another server, user or remote root is discarded and the
+ * run merges only (S3); with an existing baseline a missing remote root
+ * is never recreated (S4).
  *
- * t is the transport to reconcile remote_root through (see transport.h)
- * -- everything else is identical to cloudsync_run() below, which is
- * simply this function called with an AmiCloud/api.php transport built
- * internally from cfg.
- */
-void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remote_root,
-                     int dry_run, int verbose, Progress *pr, SyncSummary *out);
-
-/* Original entry point, unchanged in signature and behaviour -- builds
- * the AmiCloud (api.php, libcloudhttp/cmd.h) transport internally and
- * calls cloudsync_run_t(). Every existing caller (AmiCloud's apps/amicloud-sync)
- * keeps working exactly as before. */
-void cloudsync_run(const AcConfig *cfg, const char *local_root, const char *remote_root,
-                   int dry_run, int verbose, Progress *pr, SyncSummary *out);
+ * opts may be NULL (defaults). pr is caller-owned (reset internally at
+ * the start of the execute pass) so a caller can show live progress. */
+void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remote_root,
+                      const SyncOptions *opts, Progress *pr, SyncSummary *out);
 
 #endif /* CLOUDSYNC_SYNC_H */
