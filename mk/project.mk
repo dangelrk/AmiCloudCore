@@ -13,6 +13,10 @@
 #               drawer, e.g. handler/foo/mount/FOO:Storage/DOSDrivers
 # and then: include core/mk/project.mk
 #
+# Optional in install/amiga/ (not copied into the drawer themselves):
+#   icons.spec       Workbench icons for the drawer, see core/tools/mkicon.py
+#   aminet.readme    Aminet readme for "make release"; @VERSION@ is replaced
+#
 # Every sub-Makefile stays usable on its own; this file only loops over
 # them. See docs/BUILD.md of the project for the full build instructions.
 
@@ -23,6 +27,9 @@ endif
 PREFIX    ?= /usr/local
 BUILD_DIR ?= build
 DIST_DIR   = $(BUILD_DIR)/dist/$(PROJECT)
+RELEASE_DIR = $(BUILD_DIR)/release
+VERSION   ?= $(shell sed -n 's/^\#define AC_VERSION "\(.*\)"/\1/p' core/libcloudcore/include/cloudcore/amicloud.h)
+PYTHON    ?= python3
 CMAKE     ?= cmake
 QT_CMAKE_FLAGS ?= -DCMAKE_BUILD_TYPE=Release
 
@@ -34,7 +41,7 @@ export VBCC
 AMIGA_MAKEFLAGS = $(if $(VC_CONFIG),TARGET=+$(VC_CONFIG))
 
 .PHONY: all pc qt amiga build-amiga-script verify-amiga-script dist-amiga \
-        check-guide fsuae install clean help
+        release check-guide fsuae install clean help
 
 all: pc
 
@@ -44,6 +51,7 @@ help:
 	@echo "  make qt                   Qt6-Programme fuer den Host (bin/pc/)"
 	@echo "  make amiga                AmigaOS-Programme per vbcc-Cross-Compiler (bin/amiga/)"
 	@echo "  make dist-amiga           Amiga-Installationsschublade unter $(DIST_DIR)/"
+	@echo "  make release              ... dazu $(RELEASE_DIR)/$(PROJECT)-$(VERSION).lha + .readme"
 	@echo "  make build-amiga-script   Build-Amiga (natives Amiga-Buildskript) neu erzeugen"
 	@echo "  make verify-amiga-script  ... und auf dem Host mit vbcc gegenpruefen"
 	@echo "  make check-guide          AmigaGuide-Handbuch(er) in docs/user/ pruefen"
@@ -74,26 +82,40 @@ verify-amiga-script:
 	VC_CONFIG=$(VC_CONFIG) python3 core/tools/gen-build-amiga.py --name $(PROJECT) --verify
 
 # Amiga installation drawer: programs, AmigaGuide manual(s), example
-# configuration, mountlists, the install script(s) from install/amiga/,
-# LICENSE (GPL) and THIRD-PARTY-NOTICES (full MIT text of Parson, which
-# the programs contain -- required when distributing the binaries).
+# configuration, mountlists, the install scripts from install/amiga/
+# (Installer script + shell fallback), Workbench icons from
+# install/amiga/icons.spec, LICENSE (GPL) and THIRD-PARTY-NOTICES (full
+# MIT text of Parson, which the programs contain -- required when
+# distributing the binaries). Packed with core/tools/lhapack.py, because
+# macOS has no LHA packer (Homebrew's lha is Lhasa and only extracts).
 dist-amiga: amiga
-	rm -rf $(DIST_DIR)
+	rm -rf $(DIST_DIR) $(DIST_DIR).info
 	mkdir -p $(DIST_DIR)/C $(DIST_DIR)/Docs $(DIST_DIR)/Examples
 	cp bin/amiga/* $(DIST_DIR)/C/
 	cp docs/user/*.guide $(DIST_DIR)/Docs/
 	for f in config-examples/*; do case "$$f" in *.md) ;; *) cp "$$f" $(DIST_DIR)/Examples/ ;; esac; done
-	cp -R install/amiga/. $(DIST_DIR)/
+	for f in install/amiga/*; do case "$${f##*/}" in icons.spec|aminet.readme) ;; *) cp -R "$$f" $(DIST_DIR)/ ;; esac; done
 	@for x in $(DIST_EXTRA); do \
 	    f=$${x%%:*}; d=$(DIST_DIR)/$${x#*:}; mkdir -p "$$d" && cp "$$f" "$$d/"; done
 	cp LICENSE $(DIST_DIR)/LICENSE
 	cp core/THIRD-PARTY-NOTICES.txt $(DIST_DIR)/THIRD-PARTY-NOTICES
-	@rm -f $(BUILD_DIR)/$(PROJECT).lha; \
-	if command -v lha >/dev/null 2>&1 && \
-	   ( cd $(BUILD_DIR)/dist && lha -ao5q ../$(PROJECT).lha $(PROJECT) ) >/dev/null 2>&1; then \
-	    echo "Archiv: $(BUILD_DIR)/$(PROJECT).lha"; \
-	else rm -f $(BUILD_DIR)/$(PROJECT).lha; \
-	    echo "Hinweis: kein packfaehiges lha gefunden -- nur die Schublade $(DIST_DIR) erzeugt."; fi
+	@if [ -f install/amiga/icons.spec ]; then \
+	    $(PYTHON) core/tools/mkicon.py --spec install/amiga/icons.spec $(DIST_DIR); fi
+	$(PYTHON) core/tools/lhapack.py $(BUILD_DIR)/$(PROJECT).lha $(BUILD_DIR)/dist \
+	    $(PROJECT) $(if $(wildcard install/amiga/icons.spec),$(PROJECT).info)
+
+# Release files as uploaded to Aminet/GitHub: the archive with version in
+# its name plus the Aminet readme (install/amiga/aminet.readme, Latin-1).
+# The archive is checked with lha (Lhasa) when it is installed.
+release: dist-amiga
+	@test -n "$(VERSION)" || { echo "VERSION unbekannt (AC_VERSION nicht gefunden)"; exit 1; }
+	mkdir -p $(RELEASE_DIR)
+	cp $(BUILD_DIR)/$(PROJECT).lha $(RELEASE_DIR)/$(PROJECT)-$(VERSION).lha
+	@if [ -f install/amiga/aminet.readme ]; then \
+	    sed 's/@VERSION@/$(VERSION)/g' install/amiga/aminet.readme > $(RELEASE_DIR)/$(PROJECT)-$(VERSION).readme; fi
+	@if command -v lha >/dev/null 2>&1; then \
+	    lha t $(RELEASE_DIR)/$(PROJECT)-$(VERSION).lha >/dev/null && echo "lha t: Archiv in Ordnung"; fi
+	@ls -l $(RELEASE_DIR)/$(PROJECT)-$(VERSION).*
 
 # AmigaGuide syntax/encoding check (nodes, links, Latin-1, line length).
 check-guide:
