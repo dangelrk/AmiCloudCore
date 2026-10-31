@@ -30,7 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define AC_VERSION "0.1"
+#include "version.h"   /* AC_VERSION, AC_DATE */
 #ifndef AC_MAX_PATH
 #define AC_MAX_PATH 1024
 #endif

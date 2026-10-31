@@ -17,6 +17,13 @@
 #   icons.spec       Workbench icons for the drawer, see core/tools/mkicon.py
 #   aminet.readme    Aminet readme for "make release"; @VERSION@ is replaced
 #
+# In the drawer's Install-*, Uninstall-* and ReadMe, dist-amiga replaces
+# @VERSION@ (e.g. 0.1), @DATE@ (dd.mm.yyyy), @VER_MAJOR@ (0) and
+# @VER_REVN@ (revision plus one, 2) -- the shell installers compare
+# installed programs against them with "Version ... FILE". Version and
+# date come from core/libcloudcore/include/cloudcore/version.h. With an
+# Install-*.shell, the helper core/tools/amiga/Install-Datei is copied too.
+#
 # Every sub-Makefile stays usable on its own; this file only loops over
 # them. See docs/BUILD.md of the project for the full build instructions.
 
@@ -28,7 +35,11 @@ PREFIX    ?= /usr/local
 BUILD_DIR ?= build
 DIST_DIR   = $(BUILD_DIR)/dist/$(PROJECT)
 RELEASE_DIR = $(BUILD_DIR)/release
-VERSION   ?= $(shell sed -n 's/^\#define AC_VERSION "\(.*\)"/\1/p' core/libcloudcore/include/cloudcore/amicloud.h)
+VERSION_H  = core/libcloudcore/include/cloudcore/version.h
+VERSION   ?= $(shell sed -n 's/^\#define AC_VERSION *"\([^"]*\)".*/\1/p' $(VERSION_H))
+DATE      ?= $(shell sed -n 's/^\#define AC_DATE *"\([^"]*\)".*/\1/p' $(VERSION_H))
+VER_MAJOR  = $(word 1,$(subst ., ,$(VERSION)))
+VER_REVN   = $(shell expr $(word 2,$(subst ., ,$(VERSION))) + 1)
 PYTHON    ?= python3
 CMAKE     ?= cmake
 QT_CMAKE_FLAGS ?= -DCMAKE_BUILD_TYPE=Release
@@ -99,6 +110,15 @@ dist-amiga: amiga
 	    f=$${x%%:*}; d=$(DIST_DIR)/$${x#*:}; mkdir -p "$$d" && cp "$$f" "$$d/"; done
 	cp LICENSE $(DIST_DIR)/LICENSE
 	cp core/THIRD-PARTY-NOTICES.txt $(DIST_DIR)/THIRD-PARTY-NOTICES
+	@if ls install/amiga/Install-*.shell >/dev/null 2>&1; then \
+	    cp core/tools/amiga/Install-Datei $(DIST_DIR)/; fi
+	@test -n "$(VERSION)" -a -n "$(DATE)" -a -n "$(VER_REVN)" || \
+	    { echo "Version/Datum nicht gefunden ($(VERSION_H))"; exit 1; }
+	@for f in $(DIST_DIR)/Install-* $(DIST_DIR)/Uninstall-* $(DIST_DIR)/ReadMe; do \
+	    [ -f "$$f" ] || continue; \
+	    LC_ALL=C sed -e 's/@VERSION@/$(VERSION)/g' -e 's/@DATE@/$(DATE)/g' \
+	        -e 's/@VER_MAJOR@/$(VER_MAJOR)/g' -e 's/@VER_REVN@/$(VER_REVN)/g' \
+	        "$$f" > "$$f.tmp" && mv "$$f.tmp" "$$f"; done
 	@if [ -f install/amiga/icons.spec ]; then \
 	    $(PYTHON) core/tools/mkicon.py --spec install/amiga/icons.spec $(DIST_DIR); fi
 	$(PYTHON) core/tools/lhapack.py $(BUILD_DIR)/$(PROJECT).lha $(BUILD_DIR)/dist \
@@ -109,6 +129,7 @@ dist-amiga: amiga
 # The archive is checked with lha (Lhasa) when it is installed.
 release: dist-amiga
 	@test -n "$(VERSION)" || { echo "VERSION unbekannt (AC_VERSION nicht gefunden)"; exit 1; }
+	@echo "Release $(PROJECT) $(VERSION) ($(DATE))"
 	mkdir -p $(RELEASE_DIR)
 	cp $(BUILD_DIR)/$(PROJECT).lha $(RELEASE_DIR)/$(PROJECT)-$(VERSION).lha
 	@if [ -f install/amiga/aminet.readme ]; then \

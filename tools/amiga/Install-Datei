@@ -1,0 +1,62 @@
+.KEY NAME/A,ZIEL/A,ICON/S
+.BRA {
+.KET }
+; Install-Datei -- Hilfsskript der Shell-Installer (Install-*.shell)
+; SPDX-License-Identifier: GPL-3.0-or-later
+; Copyright (C) 2026 Ronny Krueger
+;
+; Aufruf aus der Installationsschublade:
+;     Execute Install-Datei <Name> <Ziel> [ICON]
+; kopiert C/<Name> nach <Ziel> (mit ":" oder "/" am Ende, z.B. C: oder
+; SYS:Tools/). Liegt dort schon eine NEUERE Version als die dieses Archivs,
+; wird vorher gefragt. Gleiche oder ältere Versionen werden ersetzt.
+; Mit ICON kommt C/<Name>.info mit, aber nur, wenn am Ziel noch kein Icon
+; liegt (eigene Tooltypes und Positionen bleiben erhalten).
+;
+; Erwartet vom aufrufenden Skript (setzt make dist-amiga ein):
+;     instver   Version dieses Archivs, z.B. 0 bei 0.1
+;     instrevn  Revision dieses Archivs plus 1, z.B. 2 bei 0.1
+; Ergebnis: instok = 1, wenn kopiert wurde, sonst 0;
+;           instfehler = 1 bei einem Fehler (wird nie zurückgesetzt).
+;
+; Variablennamen ohne "_": die Shell ersetzt $name_mit_unterstrich nicht.
+
+FailAt 21
+Set instok 0
+Set instneu 1
+
+If EXISTS {ZIEL}{NAME}
+  ; Version liefert 0, wenn die installierte Datei mindestens
+  ; instver.instrevn hat, also neuer ist als die im Archiv.
+  Version >NIL: {ZIEL}{NAME} $instver $instrevn FILE
+  If NOT WARN
+    Echo "  {ZIEL}{NAME} ist neuer als die Version in diesem Archiv:"
+    Echo NOLINE "    installiert: "
+    Version {ZIEL}{NAME} FILE
+    Echo NOLINE "    im Archiv:   "
+    Version C/{NAME} FILE
+    Ask "  Trotzdem durch die ältere Version ersetzen? (y/n)"
+    If NOT WARN
+      Set instneu 0
+      Echo "  {ZIEL}{NAME} bleibt unverändert."
+    EndIf
+  EndIf
+EndIf
+
+If $instneu EQ 1
+  Copy C/{NAME} TO {ZIEL} QUIET
+  If ERROR
+    Echo "FEHLER: C/{NAME} konnte nicht nach {ZIEL} kopiert werden."
+    Set instfehler 1
+  Else
+    Protect >NIL: {ZIEL}{NAME} +rwed
+    If "{ICON}" EQ "ICON"
+      If NOT EXISTS {ZIEL}{NAME}.info
+        Copy C/{NAME}.info TO {ZIEL} QUIET
+      EndIf
+    EndIf
+    Set instok 1
+    Echo "  {ZIEL}{NAME} installiert."
+  EndIf
+EndIf
+UnSet instneu
