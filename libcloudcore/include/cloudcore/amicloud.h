@@ -62,6 +62,9 @@ typedef struct {
     int  cache_ttl;              /* Nur Amiga-Handler: Lebensdauer des
                                   * Verzeichnis-Caches in Sekunden, 0 =
                                   * Vorgabe des Handlers. */
+    char charset[32];            /* Nur Amiga: Zeichensatz der Dateinamen fuer
+                                  * codesets.library (z. B. "ISO-8859-2"),
+                                  * leer = Systemvorgabe (charset.h). */
 } AcConfig;
 
 #endif /* AMICLOUD_H */
