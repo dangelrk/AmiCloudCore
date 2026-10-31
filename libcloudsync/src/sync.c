@@ -565,7 +565,11 @@ static int index_local_tree_sync(const char *local_root, const char *rel_prefix,
 /* ------------------------------------------------------------------ */
 typedef enum {
     SA_MKDIR_LOCAL, SA_MKDIR_REMOTE, SA_UPLOAD, SA_DOWNLOAD,
-    SA_ALIGN_LOCAL, SA_ALIGN_REMOTE, SA_DEL_LOCAL, SA_DEL_REMOTE
+    SA_ALIGN_LOCAL, SA_ALIGN_REMOTE, SA_DEL_LOCAL, SA_DEL_REMOTE,
+    /* phase 3, conflicts kept as copies (see do_keep_both() etc.) */
+    SA_KEEP_BOTH,   /* file vs file: compare, then local -> copy, server -> name */
+    SA_FILE_AWAY,   /* local file vs server directory */
+    SA_RFILE_AWAY   /* local directory vs server file */
 } SyncActionType;
 
 typedef struct {
@@ -589,6 +593,8 @@ typedef struct {
     long if_id;
     char if_token[64];
     int  create_only;
+    char lmd5[33];  /* KEEP_BOTH: hash of the local version as scanned */
+    int  declined;  /* deletion refused by the mass deletion guard */
 } SyncAction;
 
 /* oom: an action could not be queued. Its baseline entry is predicted
@@ -1013,6 +1019,270 @@ static int remote_file_changed(const SyncEntry *re, const SyncStateEntry *be)
     return be->token[0] && strcmp(re->token, be->token) != 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Phase 3: conflicts -- keep both versions                             */
+/* ------------------------------------------------------------------ */
+
+/* "Brief.txt" -> "Brief_K261031-1402.txt" (local time; n > 1 adds
+ * "-n"). base is a UTF-8 server name; the result is shortened at the
+ * stem so that its LOCAL form fits name_max. Only '_', '-', 'K' and
+ * digits are added: legal on AmigaOS, Windows, macOS, Linux and servers. */
+static void conflict_name(const char *base, int n, int name_max, char *out, size_t sz)
+{
+    char stem[AC_MAX_PATH], suffix[32], local[AC_MAX_PATH];
+    const char *dot = strrchr(base, '.');
+    const char *ext;
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    size_t sl;
+
+    if (!dot || dot == base) dot = base + strlen(base);   /* no extension, or ".name" */
+    ext = dot;
+    sl = (size_t)(dot - base);
+    if (sl >= sizeof(stem)) sl = sizeof(stem) - 1;
+    memcpy(stem, base, sl);
+    stem[sl] = '\0';
+    if (tm)
+        snprintf(suffix, sizeof(suffix), "_K%02d%02d%02d-%02d%02d", tm->tm_year % 100,
+                 tm->tm_mon + 1, tm->tm_mday, tm->tm_hour, tm->tm_min);
+    else
+        snprintf(suffix, sizeof(suffix), "_K");
+    if (n > 1) {
+        size_t l = strlen(suffix);
+        snprintf(suffix + l, sizeof(suffix) - l, "-%d", n);
+    }
+    for (;;) {
+        snprintf(out, sz, "%s%s%s", stem, suffix, ext);
+        cs_from_utf8(out, local, sizeof(local));
+        if ((int)strlen(local) <= name_max || !stem[0]) break;
+        /* drop the last UTF-8 character of the stem */
+        sl = strlen(stem);
+        do { sl--; } while (sl > 0 && ((unsigned char)stem[sl] & 0xC0) == 0x80);
+        stem[sl] = '\0';
+    }
+}
+
+/* last component of a '/' path */
+static const char *last_comp(const char *p)
+{
+    const char *s = strrchr(p, '/');
+    return s ? s + 1 : p;
+}
+
+/* dir part of relpath ("" at the top) joined with name */
+static void rel_sibling(char *out, size_t sz, const char *relpath, const char *name)
+{
+    const char *s = strrchr(relpath, '/');
+    if (s) snprintf(out, sz, "%.*s/%s", (int)(s - relpath), relpath, name);
+    else snprintf(out, sz, "%s", name);
+}
+
+static void rpath_sibling(char *out, size_t sz, const char *rpath, const char *name)
+{
+    const char *s = strrchr(rpath, '/');
+    if (s) snprintf(out, sz, "%.*s/%s", (int)(s - rpath), rpath, name);
+    else snprintf(out, sz, "%s", name);
+}
+
+/* A free conflict copy name next to lpath: UTF-8 name in uname, local
+ * path in lcpath. 0 if none of 9 tries is free. */
+static int find_conflict_copy(const SyncAction *act, int name_max,
+                              char *uname, size_t usz, char *lcpath, size_t lsz)
+{
+    int n;
+    for (n = 1; n <= 9; n++) {
+        char lname[AC_MAX_PATH];
+        conflict_name(last_comp(act->relpath), n, name_max, uname, usz);
+        cs_from_utf8(uname, lname, sizeof(lname));
+        localfs_sibling(lcpath, lsz, act->lpath, lname);
+        if (!localfs_exists(lcpath)) return 1;
+    }
+    return 0;
+}
+
+/* Uploads a conflict copy under its own name (never over something) and
+ * records it in the baseline. 1 on success. */
+static int upload_copy(SyncTransport *t, const SyncAction *act, const char *lcpath,
+                       const char *uname, SyncState *new_st, long now)
+{
+    char rcpath[AC_MAX_PATH], relc[AC_MAX_PATH], md5hex[33];
+    long size = 0, mtime = 0;
+    SyncPutCond cond;
+    SyncPutResult res;
+    rpath_sibling(rcpath, sizeof(rcpath), act->rpath, uname);
+    rel_sibling(relc, sizeof(relc), act->relpath, uname);
+    localfs_stat(lcpath, &size, &mtime);
+    if (!md5_file_hex(lcpath, md5hex)) md5hex[0] = '\0';
+    memset(&cond, 0, sizeof(cond));
+    cond.create_only = 1;
+    if (t->put(t, lcpath, rcpath, mtime, &cond, &res) != SYNC_PUT_OK) {
+        ui_notify(UI_WARN, "Konfliktkopie %s nicht hochgeladen -- folgt beim naechsten Lauf", lcpath);
+        return 0;
+    }
+    syncstate_upsert(new_st, relc, 0, size, mtime, md5hex, res.token,
+                     res.revision > 0 ? res.revision : 1, res.id, now);
+    return 1;
+}
+
+/* SA_KEEP_BOTH: both versions of a file differ (changed on both sides,
+ * or both new without a baseline). The server version is loaded into a
+ * .part first and compared -- equal content (WebDAV has no hashes) is no
+ * conflict at all. Otherwise the local file becomes the conflict copy
+ * (renamed, never overwritten), the server version takes the original
+ * name, and the copy is uploaded under its own name. */
+static void do_keep_both(SyncTransport *t, SyncAction *act, const SyncOptions *o,
+                         SyncState *new_st, SyncSummary *out, int name_max, long now)
+{
+    char part[AC_MAX_PATH], h[33], uname[AC_MAX_PATH], lcpath[AC_MAX_PATH];
+    SyncStateEntry *se;
+
+    localfs_sibling(part, sizeof(part), act->lpath, SYNC_PART_FILE);
+    if (t->get(t, act->rpath, part, act->lpath) != 0) {
+        remove(part);
+        act->failed = 1; out->errors++;
+        ac_log_printf("sync: Herunterladen fehlgeschlagen: %s\n", act->rpath);
+        return;
+    }
+    if (virus_found(o, part, act->lpath, out)) { remove(part); act->failed = 1; return; }
+    if (!md5_file_hex(part, h)) h[0] = '\0';
+    se = syncstate_find(new_st, act->relpath);
+    if (h[0] && strcmp(h, act->lmd5) == 0) {   /* same content: nothing to keep twice */
+        remove(part);
+        if (se) { strncpy(se->md5, h, sizeof(se->md5) - 1); se->md5[sizeof(se->md5) - 1] = '\0'; }
+        out->unchanged++;
+        return;
+    }
+    if (!local_as_scanned(act)) {              /* S7 */
+        remove(part);
+        act->skipped = 1;
+        return;
+    }
+    if (!find_conflict_copy(act, name_max, uname, sizeof(uname), lcpath, sizeof(lcpath)) ||
+        rename(act->lpath, lcpath) != 0) {
+        remove(part);
+        act->failed = 1; out->errors++;
+        ui_notify(UI_ERROR, "Konflikt bei %s: lokale Fassung laesst sich nicht umbenennen", act->lpath);
+        return;
+    }
+    if (!localfs_replace(part, act->lpath)) {
+        rename(lcpath, act->lpath);            /* back as it was */
+        remove(part);
+        act->failed = 1; out->errors++;
+        return;
+    }
+    localfs_utime(act->lpath, act->mtime);
+    if (se) { strncpy(se->md5, h, sizeof(se->md5) - 1); se->md5[sizeof(se->md5) - 1] = '\0'; }
+    upload_copy(t, act, lcpath, uname, new_st, now);
+    out->copies++;
+    ui_notify(UI_WARN, "Konflikt: %s -- beide Fassungen behalten, die lokale als %s",
+              act->lpath, lcpath);
+}
+
+/* SA_FILE_AWAY: a local file where the server has a directory. The file
+ * becomes a conflict copy (renamed, uploaded); the directory then comes
+ * down normally (its contents are queued right after this action). */
+static void do_file_away(SyncTransport *t, SyncAction *act, SyncState *new_st,
+                         SyncSummary *out, int name_max, long now)
+{
+    char uname[AC_MAX_PATH], lcpath[AC_MAX_PATH];
+    if (!local_as_scanned(act)) { act->skipped = 1; return; }
+    if (!find_conflict_copy(act, name_max, uname, sizeof(uname), lcpath, sizeof(lcpath)) ||
+        rename(act->lpath, lcpath) != 0 || !localfs_mkdir(act->lpath)) {
+        act->failed = 1; out->errors++;
+        ui_notify(UI_ERROR, "Konflikt bei %s: Datei gegen Ordner nicht aufloesbar", act->lpath);
+        return;
+    }
+    upload_copy(t, act, lcpath, uname, new_st, now);
+    out->copies++;
+    ui_notify(UI_WARN, "Konflikt: %s ist auf dem Server ein Ordner -- die Datei heisst jetzt %s",
+              act->lpath, lcpath);
+}
+
+/* SA_RFILE_AWAY: a local directory where the server has a file. The
+ * server file is loaded as a local conflict copy, uploaded under that
+ * name, deleted under its old name (only if unchanged, S8), and the
+ * directory is created on the server; its contents follow. */
+static void do_rfile_away(SyncTransport *t, SyncAction *act, const SyncOptions *o,
+                          SyncState *new_st, SyncSummary *out, int name_max, long now)
+{
+    char uname[AC_MAX_PATH], lcpath[AC_MAX_PATH];
+    SyncPutCond cond;
+    if (!find_conflict_copy(act, name_max, uname, sizeof(uname), lcpath, sizeof(lcpath)) ||
+        t->get(t, act->rpath, lcpath, lcpath) != 0) {
+        remove(lcpath);
+        act->failed = 1; out->errors++;
+        return;
+    }
+    if (virus_found(o, lcpath, lcpath, out)) { remove(lcpath); act->failed = 1; return; }
+    localfs_utime(lcpath, act->mtime);
+    if (!upload_copy(t, act, lcpath, uname, new_st, now)) { act->failed = 1; out->errors++; return; }
+    memset(&cond, 0, sizeof(cond));
+    cond.if_revision = act->if_revision;
+    cond.if_id       = act->if_id;
+    cond.if_token    = act->if_token;
+    if (t->del(t, act->rpath, &cond) != SYNC_PUT_OK || t->mkdir_quiet(t, act->rpath) != 0) {
+        act->failed = 1; out->errors++;
+        ui_notify(UI_ERROR, "Konflikt bei %s: Server-Datei nicht durch den Ordner ersetzbar", act->rpath);
+        return;
+    }
+    out->copies++;
+    ui_notify(UI_WARN, "Konflikt: %s ist lokal ein Ordner -- die Server-Datei heisst jetzt %s",
+              act->rpath, uname);
+}
+
+/* queues one of the conflict actions; re/le as for downloads/uploads */
+static SyncAction *queue_conflict(SyncActions *acts, SyncActionType type, const SyncEntry *re,
+                                  const SyncEntry *le, const char *relpath,
+                                  const char *lpath, const char *rpath)
+{
+    SyncAction *act = queue_action(acts, type, relpath);
+    if (!act) return NULL;
+    strncpy(act->lpath, lpath, sizeof(act->lpath) - 1);
+    strncpy(act->rpath, rpath, sizeof(act->rpath) - 1);
+    act->mtime = re->mtime;
+    act->size  = re->size;
+    act->if_revision = re->revision;
+    act->if_id       = re->id;
+    strncpy(act->if_token, re->token, sizeof(act->if_token) - 1);
+    note_local(act, le);
+    if (le) strncpy(act->lmd5, le->md5, sizeof(act->lmd5) - 1);
+    return act;
+}
+
+/* Section 5 of the plan: more deletions on one side than
+ * max(del_min, del_pct % of the baseline) are asked for once per side.
+ * "No" marks them declined: not executed, and NOT rolled back -- their
+ * paths are absent from the new baseline, so the next run sees the files
+ * on one side only and copies them back (like ownCloud). */
+static void guard_mass_deletion(SyncActions *acts, const SyncOptions *o, int base_n,
+                                int dry_run, SyncSummary *out)
+{
+    int side, i;
+    int dmin = o->del_min > 0 ? o->del_min : 20;
+    int dpct = o->del_pct > 0 ? o->del_pct : 50;
+    long limit = (long)base_n * dpct / 100;
+    if (limit < dmin) limit = dmin;
+    for (side = 0; side < 2; side++) {
+        SyncActionType ty = side ? SA_DEL_REMOTE : SA_DEL_LOCAL;
+        int n = 0;
+        for (i = 0; i < acts->n; i++) if (acts->items[i].type == ty) n++;
+        if (n <= limit) continue;
+        if (dry_run) {
+            ui_notify(UI_WARN, "Achtung: %d Eintraege wuerden %s geloescht", n,
+                      side ? "auf dem Server" : "lokal");
+            continue;
+        }
+        if (o->force_deletes ||
+            ui_confirm("Der Abgleich wuerde %d von %d Eintraegen %s loeschen. Wirklich loeschen?",
+                       n, base_n, side ? "auf dem Server" : "lokal"))
+            continue;
+        for (i = 0; i < acts->n; i++)
+            if (acts->items[i].type == ty) { acts->items[i].declined = 1; out->kept++; }
+        ui_notify(UI_WARN, "%d Loeschungen %s nicht ausgefuehrt -- der naechste Lauf kopiert "
+                  "die Dateien zurueck", n, side ? "auf dem Server" : "lokal");
+    }
+}
+
 /* Smallest of up to three (possibly NULL) current merge-scan keys. */
 static const char *pick_min_path(const char *a, const char *b, const char *c)
 {
@@ -1081,6 +1351,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     int         cp_actions = 0;   /* S11 checkpoint counters */
     long        cp_time;
     int         cp_every = SYNC_CHECKPOINT_ACTIONS;
+    int         run_name_max = 255;
 
     if (!opts) { sync_options_init(&defaults); opts = &defaults; }
     dry_run = opts->dry_run;
@@ -1214,6 +1485,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     {
         int name_max = opts->name_max > 0 ? opts->name_max
                      : dry_run ? 255 : localfs_name_max(local_root);
+        run_name_max = name_max;
         if (!find_long_names(&ridx, name_max, &case_skips, &out->skipped)) {
             ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: kein Speicher");
             out->errors++;
@@ -1273,7 +1545,16 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
 
         if (le && re) {
             if (le->is_dir != re->is_dir) {
-                report_conflict(verbose, out, &new_st, cur, "file vs. directory");
+                if (opts->conflict_skip) {
+                    report_conflict(verbose, out, &new_st, cur, "file vs. directory");
+                } else if (!le->is_dir) {   /* local file, server directory */
+                    queue_conflict(&acts, SA_FILE_AWAY, re, le, cur, lpath, rpath);
+                    syncstate_upsert(&new_st, cur, 1, 0, re->mtime, "", re->token,
+                                     re->revision, re->id, now);
+                } else {                    /* local directory, server file */
+                    queue_conflict(&acts, SA_RFILE_AWAY, re, le, cur, lpath, rpath);
+                    syncstate_upsert(&new_st, cur, 1, 0, le->mtime, "", "", 1, 0, now);
+                }
             } else if (le->is_dir) {
                 /* Both directories, both already exist: nothing to
                  * transfer, but keep the baseline current so a future
@@ -1294,9 +1575,15 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                     syncstate_upsert(&new_st, cur, 0, re->size,
                                     (re->mtime < le->mtime) ? re->mtime : le->mtime,
                                     re->md5, re->token, re->revision, re->id, now);
-                } else {
+                } else if (opts->conflict_skip) {
                     report_conflict(verbose, out, &new_st, cur,
                                     "unrelated content on both sides, no prior sync baseline");
+                } else {
+                    /* compared after loading (WebDAV has no hashes); a
+                     * real difference keeps both */
+                    queue_conflict(&acts, SA_KEEP_BOTH, re, le, cur, lpath, rpath);
+                    syncstate_upsert(&new_st, cur, 0, re->size, re->mtime, re->md5, re->token,
+                                     re->revision, re->id, now);
                 }
             } else {
                 int local_changed  = (strcmp(le->md5, be->md5) != 0);
@@ -1357,9 +1644,13 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                     out->unchanged++; /* both changed but converged independently */
                     syncstate_upsert(&new_st, cur, 0, re->size, re->mtime, re->md5, re->token,
                                     re->revision, re->id, now);
-                } else {
+                } else if (opts->conflict_skip) {
                     report_conflict(verbose, out, &new_st, cur, "different content on both sides since last sync");
                     carry_forward(&new_st, be);
+                } else {
+                    queue_conflict(&acts, SA_KEEP_BOTH, re, le, cur, lpath, rpath);
+                    syncstate_upsert(&new_st, cur, 0, re->size, re->mtime, re->md5, re->token,
+                                     re->revision, re->id, now);
                 }
             }
         } else if (le && !re) {
@@ -1371,9 +1662,15 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
 
                 if (unchanged_for_del) {
                     queue_del_local(&acts, le, cur, lpath, rpath);
-                } else {
+                } else if (opts->conflict_skip) {
                     report_conflict(verbose, out, &new_st, cur, "deleted remotely but changed locally");
                     carry_forward(&new_st, be);
+                } else if (le->is_dir) {    /* changed locally wins: back to the server */
+                    queue_mkdir_remote(&acts, cur, rpath);
+                    syncstate_upsert(&new_st, cur, 1, 0, le->mtime, "", "", 1, 0, now);
+                } else {
+                    queue_upload(&acts, le, NULL, cur, lpath, rpath);
+                    syncstate_upsert(&new_st, cur, 0, le->size, le->mtime, le->md5, "", 1, 0, now);
                 }
             } else if (le->is_dir) {
                 queue_mkdir_remote(&acts, cur, rpath);
@@ -1391,9 +1688,16 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
 
                 if (unchanged_for_del) {
                     queue_del_remote(&acts, re, cur, lpath, rpath);
-                } else {
+                } else if (opts->conflict_skip) {
                     report_conflict(verbose, out, &new_st, cur, "deleted locally but changed remotely");
                     carry_forward(&new_st, be);
+                } else if (re->is_dir) {    /* changed on the server wins: back down */
+                    queue_mkdir_local(&acts, cur, lpath);
+                    syncstate_upsert(&new_st, cur, 1, 0, re->mtime, "", re->token, re->revision, re->id, now);
+                } else {
+                    queue_download(&acts, re, NULL, cur, lpath, rpath);
+                    syncstate_upsert(&new_st, cur, 0, re->size, re->mtime, re->md5, re->token,
+                                     re->revision, re->id, now);
                 }
             } else if (re->is_dir) {
                 queue_mkdir_local(&acts, cur, lpath);
@@ -1409,6 +1713,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
          * baseline entry silently (nothing added to new_st), done. */
     }
     keep_dirs_with_survivors(&acts, &ridx, &lidx, &new_st, now, verbose ? "Sync" : NULL);
+    guard_mass_deletion(&acts, opts, old_st.n, dry_run, out);
     index_free(&ridx); index_free(&lidx);
 
     /* An action that could not be queued still has its predicted baseline
@@ -1428,7 +1733,8 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     cp_time = (long)time(NULL);
     cp_every = acts.n / 10 > SYNC_CHECKPOINT_ACTIONS ? acts.n / 10 : SYNC_CHECKPOINT_ACTIONS;
     for (i = 0; i < acts.n; i++) {
-        if (acts.items[i].type == SA_UPLOAD || acts.items[i].type == SA_DOWNLOAD) {
+        if (acts.items[i].type == SA_UPLOAD || acts.items[i].type == SA_DOWNLOAD ||
+            acts.items[i].type == SA_KEEP_BOTH) {
             pr->total++;
             pr->bytes_total += acts.items[i].size;
         }
@@ -1568,6 +1874,18 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
         case SA_ALIGN_REMOTE:
             if (!dry_run) t->setdate(t, act->rpath, act->mtime);
             break;
+        case SA_KEEP_BOTH:
+            if (dry_run) { if (verbose) ui_notify(UI_INFO, "(Konflikt, beide behalten) %s", act->lpath); }
+            else { progress_prefix(pr, act->size); do_keep_both(t, act, opts, &new_st, out, run_name_max, now); }
+            break;
+        case SA_FILE_AWAY:
+            if (dry_run) { if (verbose) ui_notify(UI_INFO, "(Konflikt Datei/Ordner)   %s", act->lpath); }
+            else do_file_away(t, act, &new_st, out, run_name_max, now);
+            break;
+        case SA_RFILE_AWAY:
+            if (dry_run) { if (verbose) ui_notify(UI_INFO, "(Konflikt Ordner/Datei)   %s", act->lpath); }
+            else do_rfile_away(t, act, opts, &new_st, out, run_name_max, now);
+            break;
         case SA_DEL_LOCAL:
         case SA_DEL_REMOTE:
             continue; /* handled leaf-first in Pass 2b below */
@@ -1599,6 +1917,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
 
         for (i = 0; i < del_n; i++) {
             SyncAction *act = del_ptrs[i];
+            if (act->declined) continue;   /* the user said no (mass deletion) */
             /* S2: a stopped run never deletes */
             if (!dry_run && !stopped && ui_break_pending()) stopped = 1;
             if (stopped) { act->skipped = 1; continue; }
@@ -1671,7 +1990,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
      * predicted entry for anything that didn't actually happen, then
      * persist -- never on a dry run, never advanced past a failed path. */
     for (i = 0; i < acts.n; i++)
-        if (acts.items[i].failed || acts.items[i].skipped) incomplete = 1;
+        if (acts.items[i].failed || acts.items[i].skipped || acts.items[i].declined) incomplete = 1;
     if (incomplete) {
         SyncState eff;
         if (build_effective_state(&eff, &new_st, &old_st, &acts, 0)) {
@@ -1719,6 +2038,16 @@ out_free:
     snprintf(summary, sizeof(summary),
             "%d hochgeladen, %d heruntergeladen, %d unveraendert, %d geloescht, %d Konflikt(e)",
             out->uploaded, out->downloaded, out->unchanged, out->deleted, out->conflicts);
+    if (out->copies) {
+        char cpsuf[48];
+        snprintf(cpsuf, sizeof(cpsuf), ", %d Konfliktkopie(n)", out->copies);
+        strncat(summary, cpsuf, sizeof(summary) - strlen(summary) - 1);
+    }
+    if (out->kept) {
+        char kpsuf[48];
+        snprintf(kpsuf, sizeof(kpsuf), ", %d Loeschung(en) zurueckgehalten", out->kept);
+        strncat(summary, kpsuf, sizeof(summary) - strlen(summary) - 1);
+    }
     if (out->viruses) {
         char virsuf[40];
         snprintf(virsuf, sizeof(virsuf), ", %d VIRUS", out->viruses);

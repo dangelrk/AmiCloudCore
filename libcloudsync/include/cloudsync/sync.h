@@ -38,6 +38,10 @@ typedef struct {
     int skipped;
     /* files not transferred because the virus check found something */
     int viruses;
+    /* conflicts resolved by keeping both versions (conflict copies) */
+    int copies;
+    /* deletions not done because the mass deletion guard said no */
+    int kept;
 } SyncSummary;
 
 /* Options of one run. Initialise with sync_options_init() and change
@@ -62,6 +66,18 @@ typedef struct {
      * < 0 = no check. virus_check: replaces localfs_virus_check (tests). */
     long virus_max;
     int (*virus_check)(const char *path, long max_bytes, char *name, size_t namesz);
+    /* Conflicts (phase 3): 0 = keep both versions -- the local one is
+     * renamed to a conflict copy "Name_K261031-1402.ext" and uploaded under
+     * that name, the server version takes the original name; a file
+     * deleted on one side but changed on the other is transferred again.
+     * 1 = skip and report, change nothing (the behaviour before 0.3). */
+    int conflict_skip;
+    /* Mass deletion guard: more deletions on one side than
+     * max(del_min, del_pct % of the baseline) are asked for (ui_confirm);
+     * "no" leaves the files alone and the next run copies them back.
+     * 0 = defaults (20 files, 50 %); force_deletes = 1 never asks. */
+    int del_min, del_pct;
+    int force_deletes;
 } SyncOptions;
 
 void sync_options_init(SyncOptions *o);
