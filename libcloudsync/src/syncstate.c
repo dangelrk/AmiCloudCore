@@ -151,18 +151,10 @@ int syncstate_save(const char *local_root, const SyncState *st)
     json_value_free(root_val);
     if (!ok) { remove(tmp_path); return 0; }
 
-    /* AmigaDOS Rename() fails outright if the destination already
-     * exists (see dos.doc's Rename() autodoc) -- unlike POSIX rename(),
-     * it never replaces an existing target. Only the very first save of
-     * a given baseline (no prior sync yet) would ever succeed without
-     * this; every save after that would silently leave the OLD baseline
-     * in place, forcing every file to look "new" again on the next sync
-     * forever (see libcloudcore's config_save(), which had the
-     * identical bug -- same fix, same reasoning). Delete the old target
-     * first; if there isn't one yet (first sync), this simply fails
-     * harmlessly. */
-    remove(path);
-    if (rename(tmp_path, path) != 0) { remove(tmp_path); return 0; }
+    /* AmigaDOS Rename() never replaces an existing target; and deleting
+     * the old baseline first would lose it if the rename then failed.
+     * localfs_replace() moves the old one aside and back on failure. */
+    if (!localfs_replace(tmp_path, path)) { remove(tmp_path); return 0; }
     return 1;
 }
 

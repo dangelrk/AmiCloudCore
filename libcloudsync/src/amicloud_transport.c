@@ -61,7 +61,8 @@ static int amicloud_put(SyncTransport *t, const char *local_path,
 {
     AcPutInfo info;
     int rc = cmd_put_cond(t->cfg, local_path, remote_path,
-                          cond ? cond->if_revision : 0, cond ? cond->create_only : 0, &info);
+                          cond ? cond->if_revision : 0, cond ? cond->if_id : 0,
+                          cond ? cond->create_only : 0, &info);
     if (rc == AC_PUT_PRECONDITION) return SYNC_PUT_CONFLICT;
     if (rc != 0) return SYNC_PUT_ERROR;
     cmd_setdate_mtime(t->cfg, remote_path, mtime);   /* does not change the revision */
@@ -75,9 +76,11 @@ static int amicloud_put(SyncTransport *t, const char *local_path,
     return SYNC_PUT_OK;
 }
 
-static int amicloud_del(SyncTransport *t, const char *remote_path)
+static int amicloud_del(SyncTransport *t, const char *remote_path, const SyncPutCond *cond)
 {
-    return cmd_del(t->cfg, remote_path);
+    int rc = cmd_del_cond(t->cfg, remote_path, cond ? cond->if_revision : 0, cond ? cond->if_id : 0);
+    if (rc == AC_PUT_PRECONDITION) return SYNC_PUT_CONFLICT;
+    return rc == 0 ? SYNC_PUT_OK : SYNC_PUT_ERROR;
 }
 
 static int amicloud_mkdir_quiet(SyncTransport *t, const char *remote_path)

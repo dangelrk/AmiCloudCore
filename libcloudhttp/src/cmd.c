@@ -756,13 +756,13 @@ static int put_target(const AcConfig *cfg, const char *local_path,
 /* ------------------------------------------------------------------ */
 int cmd_put(const AcConfig *cfg, const char *local_path, const char *remote_path)
 {
-    return cmd_put_cond(cfg, local_path, remote_path, 0, 0, NULL) == 0 ? 0 : 1;
+    return cmd_put_cond(cfg, local_path, remote_path, 0, 0, 0, NULL) == 0 ? 0 : 1;
 }
 
 int cmd_put_cond(const AcConfig *cfg, const char *local_path, const char *remote_path,
-                 long if_revision, int create_only, AcPutInfo *info)
+                 long if_revision, long if_id, int create_only, AcPutInfo *info)
 {
-    char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH], cond[48];
+    char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH], cond[80];
     long fsize;
     FILE *fp;
     HttpResponse *resp;
@@ -794,8 +794,10 @@ int cmd_put_cond(const AcConfig *cfg, const char *local_path, const char *remote
     if (fsize < 0) { fclose(fp); ui_notify(UI_ERROR, "amicloudcore: cannot determine file size"); return 1; }
 
     cond[0] = '\0';
-    if (if_revision > 0)  snprintf(cond, sizeof(cond), "&if_revision=%ld", if_revision);
-    else if (create_only) snprintf(cond, sizeof(cond), "&create_only=1");
+    if (if_revision > 0 || if_id > 0)
+        snprintf(cond, sizeof(cond), "&if_revision=%ld&if_id=%ld", if_revision, if_id);
+    else if (create_only)
+        snprintf(cond, sizeof(cond), "&create_only=1");
     snprintf(url, sizeof(url), "%s/api.php?action=upload&path=%s&md5=%s%s",
              cfg->server, rpath, md5hex, cond);
 
@@ -912,6 +914,36 @@ int cmd_get_checked(const AcConfig *cfg, const char *remote_path,
 /* ------------------------------------------------------------------ */
 /* del (delete)                                                          */
 /* ------------------------------------------------------------------ */
+int cmd_del_cond(const AcConfig *cfg, const char *remote_path, long if_revision, long if_id)
+{
+    char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH], cond[80];
+    HttpResponse *resp;
+    JSON_Value *root_val;
+    JSON_Object *root;
+    const char *st;
+    int ok;
+
+    make_auth(auth, sizeof(auth), cfg);
+    full_path(rpath, sizeof(rpath), cfg, remote_path);
+    build_url(url, sizeof(url), cfg, "delete", rpath);
+    if (if_revision > 0 || if_id > 0) {
+        snprintf(cond, sizeof(cond), "&if_revision=%ld&if_id=%ld", if_revision, if_id);
+        strncat(url, cond, sizeof(url) - strlen(url) - 1);
+    }
+
+    resp = http_request("DELETE", url, auth, NULL, 0, cfg->verify_ssl);
+    g_last_status = resp ? resp->status_code : 0;
+    if (!resp || resp->status_code == 0) { http_response_free(resp); return 1; }
+    if (resp->status_code == 412) { http_response_free(resp); return AC_PUT_PRECONDITION; }
+    root_val = json_parse_string(resp->body ? resp->body : "{}");
+    http_response_free(resp);
+    root = root_val ? json_value_get_object(root_val) : NULL;
+    st = root ? json_object_get_string(root, "status") : NULL;
+    ok = st && strcmp(st, "ok") == 0;
+    if (root_val) json_value_free(root_val);
+    return ok ? 0 : 1;
+}
+
 int cmd_del(const AcConfig *cfg, const char *remote_path)
 {
     char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH];

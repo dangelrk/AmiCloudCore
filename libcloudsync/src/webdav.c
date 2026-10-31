@@ -457,8 +457,9 @@ static int webdav_put(SyncTransport *t, const char *local_path,
     make_auth(auth, sizeof(auth), t->cfg);
     /* S8: If-Match with the ETag seen at the last sync, or If-None-Match
      * for a file that must not exist yet (RFC 7232, 412 otherwise). */
-    if (cond && cond->if_token && cond->if_token[0])
-        /* the listing stores the ETag without its quotes (see above),
+    if (cond && cond->if_token && cond->if_token[0] && strncmp(cond->if_token, "W/", 2) != 0)
+        /* (a weak ETag W/"..." never matches If-Match, RFC 7232) --
+         * the listing stores the ETag without its quotes (see above),
          * If-Match needs the quoted entity tag (RFC 7232) */
         snprintf(hdr, sizeof(hdr), "X-OC-Mtime: %ld\r\nIf-Match: \"%s\"\r\n", mtime, cond->if_token);
     else if (cond && cond->create_only)
@@ -483,20 +484,26 @@ static int webdav_put(SyncTransport *t, const char *local_path,
     return ok ? SYNC_PUT_OK : SYNC_PUT_ERROR;
 }
 
-static int webdav_del(SyncTransport *t, const char *remote_path)
+static int webdav_del(SyncTransport *t, const char *remote_path, const SyncPutCond *cond)
 {
-    char url[AC_MAX_URL], auth[192];
+    char url[AC_MAX_URL], auth[192], hdr[128];
     HttpResponse *resp;
     int ok;
 
     build_url(url, sizeof(url), tbase(t), remote_path);
     make_auth(auth, sizeof(auth), t->cfg);
 
-    resp = http_request("DELETE", url, auth, NULL, 0, t->cfg->verify_ssl);
-    if (!resp || resp->status_code == 0) { http_response_free(resp); return 1; }
+    /* S8 for deletes: only the version the kernel saw (see webdav_put) */
+    hdr[0] = '\0';
+    if (cond && cond->if_token && cond->if_token[0] && strncmp(cond->if_token, "W/", 2) != 0)
+        snprintf(hdr, sizeof(hdr), "If-Match: \"%s\"\r\n", cond->if_token);
+
+    resp = http_request_hdr("DELETE", url, auth, hdr[0] ? hdr : NULL, NULL, 0, t->cfg->verify_ssl);
+    if (!resp || resp->status_code == 0) { http_response_free(resp); return SYNC_PUT_ERROR; }
+    if (resp->status_code == 412) { http_response_free(resp); return SYNC_PUT_CONFLICT; }
     ok = is_2xx(resp->status_code) || resp->status_code == 404; /* already gone */
     http_response_free(resp);
-    return ok ? 0 : 1;
+    return ok ? SYNC_PUT_OK : SYNC_PUT_ERROR;
 }
 
 static int webdav_mkdir_quiet(SyncTransport *t, const char *remote_path)

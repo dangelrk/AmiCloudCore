@@ -32,13 +32,19 @@ typedef struct {
 
 #define AC_PUT_PRECONDITION 2
 
-/* cmd_put() for the sync kernel: if_revision > 0 writes only if the
- * remote file still has that revision, create_only only if it does not
+/* cmd_put() for the sync kernel: if_revision/if_id > 0 write only if the
+ * remote file still has that revision/ID, create_only only if it does not
  * exist yet (server 0.2, HTTP 412). Returns 0 on success (info filled if
  * non-NULL), AC_PUT_PRECONDITION if the condition failed (nothing
  * written, nothing reported), 1 on any other error (reported). */
 int cmd_put_cond(const AcConfig *cfg, const char *local_path, const char *remote_path,
-                 long if_revision, int create_only, AcPutInfo *info);
+                 long if_revision, long if_id, int create_only, AcPutInfo *info);
+
+/* cmd_del() for the sync kernel: if_revision/if_id > 0 delete a file only
+ * if it still has that revision/ID (server 0.2, HTTP 412). Silent.
+ * Returns 0 on success, AC_PUT_PRECONDITION if the condition failed, 1
+ * on any other error. */
+int cmd_del_cond(const AcConfig *cfg, const char *remote_path, long if_revision, long if_id);
 
 /* Overwrite-checked put/get for interactive frontends (amicloud CLI,
  * amicloud-shell): same transfer and same target naming as cmd_put()/

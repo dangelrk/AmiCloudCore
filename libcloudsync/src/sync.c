@@ -421,6 +421,7 @@ typedef struct {
     /* UPLOAD: condition for the server (S8) -- the remote file as the
      * scan saw it, or create_only if there was none */
     long if_revision;
+    long if_id;
     char if_token[64];
     int  create_only;
 } SyncAction;
@@ -467,6 +468,7 @@ static void queue_upload(SyncActions *acts, const SyncEntry *le, const SyncEntry
     act->size  = le->size;
     if (re) {
         act->if_revision = re->revision;
+        act->if_id       = re->id;
         strncpy(act->if_token, re->token, sizeof(act->if_token) - 1);
     } else {
         act->create_only = 1;
@@ -536,6 +538,57 @@ static void queue_del_remote(SyncActions *acts, const SyncEntry *re, const char 
     strncpy(act->lpath, lpath, sizeof(act->lpath) - 1);
     strncpy(act->rpath, rpath, sizeof(act->rpath) - 1);
     act->is_dir = re->is_dir;
+    if (!re->is_dir) {   /* S8: delete only the version the scan saw */
+        act->if_revision = re->revision;
+        act->if_id       = re->id;
+        strncpy(act->if_token, re->token, sizeof(act->if_token) - 1);
+    }
+}
+
+/* Right before a directory is deleted on one side (Pass 2b), it is read
+ * again: everything the run knew about is gone by now (deepest first),
+ * so anything still in it appeared during the run, or is a kept
+ * conflict -- then the directory stays. Names that are never synced
+ * (S13: .DS_Store, Thumbs.db, ...) would block a plain remove forever and
+ * are removed with the directory. Returns 1 = now empty, 0 = something
+ * else is in it, -1 = error. */
+static int remote_dir_clear(SyncTransport *t, const char *rpath)
+{
+    SyncRemoteEntry *e = NULL;
+    int n = 0, i, others = 0, rc = 1;
+    if (!t->list(t, rpath, &e, &n)) return -1;
+    for (i = 0; i < n; i++)
+        if (!sync_name_excluded(e[i].name)) others = 1;
+    if (others) rc = 0;
+    else {
+        for (i = 0; i < n; i++) {
+            char p[AC_MAX_PATH];
+            snprintf(p, sizeof(p), "%s/%s", rpath, e[i].name);
+            if (t->del(t, p, NULL) != SYNC_PUT_OK) { rc = -1; break; }
+        }
+    }
+    free(e);
+    return rc;
+}
+
+static int local_dir_clear(const char *lpath)
+{
+    LocalDir *d;
+    LocalDirEntry e;
+    int others = 0, rc = 1;
+    if (!(d = localfs_opendir(lpath))) return -1;
+    while (localfs_readdir(d, &e))
+        if (!sync_name_excluded(e.name)) others = 1;
+    localfs_closedir(d);
+    if (others) return 0;
+    if (!(d = localfs_opendir(lpath))) return -1;
+    while (localfs_readdir(d, &e)) {
+        char p[AC_MAX_PATH];
+        localfs_join(p, sizeof(p), lpath, e.name);
+        if (!localfs_remove(p)) rc = -1;
+    }
+    localfs_closedir(d);
+    return rc;
 }
 
 static int act_ptr_relpath_cmp(const void *a, const void *b)
@@ -681,24 +734,100 @@ static void rollback_baseline_entry(SyncState *new_st, SyncState *old_st, const 
  * the predicted new baseline with every pending, failed or skipped
  * action rolled back, and the OLD global_revision (so the next run scans
  * fully). */
-#define SYNC_CHECKPOINT_ACTIONS 50
+#define SYNC_CHECKPOINT_ACTIONS 50   /* at least; grows to acts/10 */
 #define SYNC_CHECKPOINT_SECS    120
+
+static int str_ptr_cmp(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static void upsert_entry(SyncState *st, const SyncStateEntry *e)
+{
+    syncstate_upsert(st, e->path, e->is_dir, e->size, e->mtime, e->md5, e->token,
+                     e->revision, e->server_id, e->last_sync);
+}
+
+/* The baseline as it really is: new_st, except that every path of a
+ * failed or skipped action -- and with pending_too also of every action
+ * not done yet -- keeps its old_st entry (or none). One merge pass over
+ * both sorted states, O(n log n); rolling back entry by entry would be
+ * O(n^2) for a long run. out is initialised here; 0 on out of memory. */
+static int build_effective_state(SyncState *out, const SyncState *new_st,
+                                 const SyncState *old_st, const SyncActions *acts,
+                                 int pending_too)
+{
+    const char **pend;
+    int np = 0, i = 0, j = 0, k, before;
+
+    memset(out, 0, sizeof(*out));
+    pend = (const char **)malloc(sizeof(char *) * (size_t)(acts->n ? acts->n : 1));
+    if (!pend || !syncstate_set_identity(out, new_st->identity)) { free(pend); return 0; }
+    for (k = 0; k < acts->n; k++) {
+        const SyncAction *a = &acts->items[k];
+        if (a->relpath[0] && (a->failed || a->skipped || (pending_too && !a->done)))
+            pend[np++] = a->relpath;
+    }
+    qsort(pend, (size_t)np, sizeof(char *), str_ptr_cmp);
+
+    while (i < new_st->n || j < old_st->n) {
+        const SyncStateEntry *ne = i < new_st->n ? &new_st->items[i] : NULL;
+        const SyncStateEntry *oe = j < old_st->n ? &old_st->items[j] : NULL;
+        const char *p;
+        int c = !ne ? 1 : !oe ? -1 : strcmp(ne->path, oe->path);
+        p = c <= 0 ? ne->path : oe->path;
+        if (c > 0) ne = NULL;
+        if (c < 0) oe = NULL;
+        if (ne) i++;
+        if (oe) j++;
+        before = out->n;
+        if (bsearch(&p, pend, (size_t)np, sizeof(char *), str_ptr_cmp)) {
+            if (!oe) continue;
+            upsert_entry(out, oe);
+        } else {
+            if (!ne) continue;
+            upsert_entry(out, ne);
+        }
+        if (out->n == before) { free(pend); syncstate_free(out); return 0; }
+    }
+    free(pend);
+    out->global_revision = new_st->global_revision;
+    out->had_conflicts   = new_st->had_conflicts;
+    return 1;
+}
 
 static void save_checkpoint(const char *local_root, const SyncState *new_st,
                             SyncState *old_st, const SyncActions *acts)
 {
     SyncState cp;
-    int i;
-    if (!syncstate_copy(&cp, new_st)) return;   /* no memory: just no checkpoint */
-    for (i = 0; i < acts->n; i++) {
-        const SyncAction *a = &acts->items[i];
-        if (!a->done || a->failed || a->skipped)
-            rollback_baseline_entry(&cp, old_st, a->relpath);
-    }
+    if (!build_effective_state(&cp, new_st, old_st, acts, 1))
+        return;   /* no memory: just no checkpoint */
     cp.global_revision = old_st->global_revision;
     cp.had_conflicts = old_st->had_conflicts || new_st->had_conflicts;
     syncstate_save(local_root, &cp);
     syncstate_free(&cp);
+}
+
+/* Has the remote file changed since the last sync? Strongest signals
+ * first:
+ *   - another server file ID: the path now holds a different file (e.g.
+ *     deleted, then another file renamed onto it -- a rename keeps the
+ *     revision, so the revision alone would not notice);
+ *   - AmiCloud's revision, and with it the real content hash (the
+ *     baseline md5 equals the remote hash of a synced file);
+ *   - only a hash (no revisions);
+ *   - WebDAV's opaque ETag against the remembered one. An empty
+ *     remembered token means "not known yet" (right after our own upload),
+ *     which is not a change -- the next listing fills it in. */
+static int remote_file_changed(const SyncEntry *re, const SyncStateEntry *be)
+{
+    if (be->server_id > 0 && re->id > 0 && re->id != be->server_id) return 1;
+    if (be->revision > 0 && re->revision > 0) {
+        if (re->revision != be->revision) return 1;
+        return re->md5[0] && be->md5[0] && strcmp(re->md5, be->md5) != 0;
+    }
+    if (re->md5[0]) return strcmp(re->md5, be->md5) != 0;
+    return be->token[0] && strcmp(re->token, be->token) != 0;
 }
 
 /* Smallest of up to three (possibly NULL) current merge-scan keys. */
@@ -767,6 +896,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     CaseSkips   case_skips = { NULL, 0 };
     int         cp_actions = 0;   /* S11 checkpoint counters */
     long        cp_time;
+    int         cp_every = SYNC_CHECKPOINT_ACTIONS;
 
     if (!opts) { sync_options_init(&defaults); opts = &defaults; }
     dry_run = opts->dry_run;
@@ -821,6 +951,23 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
      * renamed on the server), recreating it empty would make every local
      * file look deleted remotely. Its listing then fails and the run stops
      * (S1). The local root needs no such check: the baseline lives in it. */
+    /* A missing local root is only created if the folder it should be in
+     * exists -- an unmounted drive or USB stick must not turn into a
+     * full download to some other place (macOS: /Volumes/...; AmigaOS
+     * asks for the volume, cancelling ends up here). */
+    if (!localfs_is_dir(local_root)) {
+        char parent[AC_MAX_PATH];
+        size_t pl;
+        localfs_sibling(parent, sizeof(parent), local_root, "");
+        pl = strlen(parent);
+        if (pl > 1 && parent[pl - 1] == '/') parent[pl - 1] = '\0';  /* AmigaOS: "a/" = parent of a */
+        if (parent[0] && !localfs_is_dir(parent)) {
+            ui_notify(UI_ERROR, "Abgleich abgebrochen: %s fehlt (Laufwerk nicht eingehaengt?)", parent);
+            out->errors++;
+            out->aborted = 1;
+            goto out_free;
+        }
+    }
     if (!dry_run) {
         localfs_mkdir_p(local_root);
         if (old_st.n == 0) t->mkdir_quiet(t, remote_root);
@@ -975,11 +1122,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                  *      comparing "" against a real token would always
                  *      differ and the file would flip between upload and
                  *      download forever. */
-                int remote_changed = (be->revision > 0 && re->revision > 0)
-                                     ? (re->revision != be->revision)
-                                     : re->md5[0]
-                                       ? (strcmp(re->md5, be->md5) != 0)
-                                       : (be->token[0] && strcmp(re->token, be->token) != 0);
+                int remote_changed = remote_file_changed(re, be);
 
                 if (!local_changed && !remote_changed) {
                     out->unchanged++;
@@ -1043,12 +1186,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 int unchanged_for_del;
                 if (re->is_dir)      unchanged_for_del = (be->is_dir == 1);
                 else if (be->is_dir) unchanged_for_del = 0;
-                else if (be->revision > 0 && re->revision > 0)
-                    unchanged_for_del = (re->revision == be->revision);
-                else if (re->md5[0])
-                    unchanged_for_del = (strcmp(re->md5, be->md5) == 0);
-                else
-                    unchanged_for_del = !be->token[0] || (strcmp(re->token, be->token) == 0);
+                else unchanged_for_del = !remote_file_changed(re, be);
 
                 if (unchanged_for_del) {
                     queue_del_remote(&acts, re, cur, lpath, rpath);
@@ -1087,6 +1225,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
      * bookkeeping as before this rewrite. */
     progress_reset(pr);
     cp_time = (long)time(NULL);
+    cp_every = acts.n / 10 > SYNC_CHECKPOINT_ACTIONS ? acts.n / 10 : SYNC_CHECKPOINT_ACTIONS;
     for (i = 0; i < acts.n; i++) {
         if (acts.items[i].type == SA_UPLOAD || acts.items[i].type == SA_DOWNLOAD) {
             pr->total++;
@@ -1125,6 +1264,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 int rc;
                 progress_prefix(pr, act->size);
                 cond.if_revision = act->if_revision;
+                cond.if_id       = act->if_id;
                 cond.if_token    = act->if_token;
                 cond.create_only = act->create_only;
                 rc = t->put(t, act->lpath, act->rpath, act->mtime, &cond, &res);
@@ -1223,7 +1363,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
             continue; /* handled leaf-first in Pass 2b below */
         }
         act->done = 1;
-        if (!dry_run && (++cp_actions >= SYNC_CHECKPOINT_ACTIONS ||
+        if (!dry_run && (++cp_actions >= cp_every ||
                          (long)time(NULL) - cp_time >= SYNC_CHECKPOINT_SECS)) {
             save_checkpoint(local_root, &new_st, &old_st, &acts);
             cp_actions = 0;
@@ -1262,20 +1402,44 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 ui_notify(UI_WARN, "%s wurde waehrend des Abgleichs geaendert -- nicht geloescht",
                           act->lpath);
             } else if (act->type == SA_DEL_LOCAL) {
-                if (localfs_remove(act->lpath)) out->deleted++;
-                else {
+                int clear = act->is_dir ? local_dir_clear(act->lpath) : 1;
+                if (clear == 0) {
+                    act->skipped = 1;
+                    ui_notify(UI_WARN, "%s enthaelt Neues -- nicht geloescht", act->lpath);
+                } else if (clear > 0 && localfs_remove(act->lpath)) {
+                    out->deleted++;
+                } else {
                     act->failed = 1; out->errors++;
                     ac_log_printf("sync: Loeschen (lokal) fehlgeschlagen: %s\n", act->lpath);
                 }
             } else {
-                if (t->del(t, act->rpath) == 0) out->deleted++;
-                else {
+                SyncPutCond cond;
+                int clear = act->is_dir ? remote_dir_clear(t, act->rpath) : 1;
+                int rc = SYNC_PUT_ERROR;
+                cond.if_revision = act->if_revision;
+                cond.if_id       = act->if_id;
+                cond.if_token    = act->if_token;
+                cond.create_only = 0;
+                if (clear > 0) rc = t->del(t, act->rpath, act->is_dir ? NULL : &cond);
+                if (clear == 0) {
+                    act->skipped = 1;
+                    ui_notify(UI_WARN, "%s enthaelt auf dem Server Neues -- nicht geloescht", act->rpath);
+                } else if (rc == SYNC_PUT_OK) {
+                    out->deleted++;
+                } else if (rc == SYNC_PUT_CONFLICT) {
+                    /* S8: changed on the server since the scan -- keep it */
+                    act->skipped = 1;
+                    out->conflicts++;
+                    new_st.had_conflicts = 1;
+                    ui_notify(UI_WARN, "%s wurde inzwischen auf dem Server geaendert -- nicht geloescht",
+                              act->rpath);
+                } else {
                     act->failed = 1; out->errors++;
                     ac_log_printf("sync: Loeschen (remote) fehlgeschlagen: %s\n", act->rpath);
                 }
             }
             act->done = 1;
-            if (!dry_run && (++cp_actions >= SYNC_CHECKPOINT_ACTIONS ||
+            if (!dry_run && (++cp_actions >= cp_every ||
                              (long)time(NULL) - cp_time >= SYNC_CHECKPOINT_SECS)) {
                 save_checkpoint(local_root, &new_st, &old_st, &acts);
                 cp_actions = 0;
@@ -1283,15 +1447,30 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
             }
         }
         free(del_ptrs);
+    } else {
+        /* no memory for the delete order: delete nothing this time, and
+         * roll the deletions back in the baseline so the next run redoes
+         * them -- otherwise they would vanish from the baseline and the
+         * next run would bring the files back */
+        for (i = 0; i < acts.n; i++)
+            if (acts.items[i].type == SA_DEL_LOCAL || acts.items[i].type == SA_DEL_REMOTE)
+                acts.items[i].skipped = 1;
     }
 
     /* Baseline erst nach vollstaendigem Erfolg schreiben: roll back the
      * predicted entry for anything that didn't actually happen, then
      * persist -- never on a dry run, never advanced past a failed path. */
-    for (i = 0; i < acts.n; i++) {
-        if (acts.items[i].failed || acts.items[i].skipped) {
-            incomplete = 1;
-            rollback_baseline_entry(&new_st, &old_st, acts.items[i].relpath);
+    for (i = 0; i < acts.n; i++)
+        if (acts.items[i].failed || acts.items[i].skipped) incomplete = 1;
+    if (incomplete) {
+        SyncState eff;
+        if (build_effective_state(&eff, &new_st, &old_st, &acts, 0)) {
+            syncstate_free(&new_st);
+            new_st = eff;
+        } else {
+            for (i = 0; i < acts.n; i++)   /* no memory: the slow way */
+                if (acts.items[i].failed || acts.items[i].skipped)
+                    rollback_baseline_entry(&new_st, &old_st, acts.items[i].relpath);
         }
     }
     if (stopped) {

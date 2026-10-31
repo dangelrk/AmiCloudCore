@@ -67,11 +67,13 @@ typedef struct {
     long id;        /* 0 = unknown/unsupported */
 } SyncRemoteEntry;
 
-/* Condition for put() (S8): never overwrite a remote change the kernel
- * has not seen. Each backend uses what it has -- AmiCloud the numeric
- * revision, WebDAV the ETag (If-Match) -- and ignores the rest. */
+/* Condition for put() and del() (S8): never overwrite or delete a remote
+ * change the kernel has not seen. Each backend uses what it has --
+ * AmiCloud the numeric revision and file ID, WebDAV the ETag (If-Match)
+ * -- and ignores the rest. */
 typedef struct {
     long        if_revision; /* > 0: only if the remote file has this revision */
+    long        if_id;       /* > 0: only if the remote file still has this ID */
     const char *if_token;    /* non-empty: only if the remote token (ETag) is this */
     int         create_only; /* only if the remote file does not exist yet */
 } SyncPutCond;
@@ -119,7 +121,11 @@ typedef struct SyncTransport {
                const char *remote_path, long mtime,
                const SyncPutCond *cond, SyncPutResult *res);
 
-    int (*del)(struct SyncTransport *t, const char *remote_path);
+    /* Deletes a file, or a directory (WebDAV: with everything below it --
+     * the kernel lists it right before and only deletes what it knows).
+     * cond may be NULL. Returns SYNC_PUT_OK, SYNC_PUT_ERROR or
+     * SYNC_PUT_CONFLICT (condition failed, nothing deleted). */
+    int (*del)(struct SyncTransport *t, const char *remote_path, const SyncPutCond *cond);
 
     /* "Already exists" must count as success (see cmd_mkdir_quiet) --
      * most subdirectories already existing on a repeat sync is the

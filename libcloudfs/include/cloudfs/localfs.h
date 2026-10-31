@@ -79,8 +79,10 @@ int localfs_mkdir_p(const char *path);
 void localfs_sibling(char *out, size_t sz, const char *path, const char *name);
 
 /* Moves src over dst, replacing dst if it exists (AmigaDOS Rename() and
- * the Windows CRT refuse to overwrite, so dst is deleted first). Both
- * must be on the same volume. Returns 1 on success. */
+ * the Windows CRT refuse to overwrite). dst is first moved aside to
+ * ".amicloudsync.old" next to it and only deleted once src is in place;
+ * on failure it is moved back, so dst is never lost. Both must be on the
+ * same volume. Returns 1 on success. */
 int localfs_replace(const char *src, const char *dst);
 
 /* Longest file name (bytes) the file system of dir really keeps: probed

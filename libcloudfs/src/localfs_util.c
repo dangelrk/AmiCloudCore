@@ -127,8 +127,20 @@ int localfs_case_sensitive(const char *dir)
 
 int localfs_replace(const char *src, const char *dst)
 {
-    remove(dst);
-    return rename(src, dst) == 0;
+    char bak[AC_MAX_PATH];
+    if (!localfs_exists(dst)) return rename(src, dst) == 0;
+    /* Never delete dst before src is in place: if the second rename
+     * failed, both would be gone. Move dst aside, put src there, and only
+     * then drop the old one -- or move it back. */
+    localfs_sibling(bak, sizeof(bak), dst, ".amicloudsync.old");
+    remove(bak);
+    if (rename(dst, bak) != 0) return 0;
+    if (rename(src, dst) != 0) {
+        rename(bak, dst);
+        return 0;
+    }
+    remove(bak);
+    return 1;
 }
 
 int localfs_mkdir_p(const char *path)

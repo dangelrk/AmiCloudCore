@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include <utime.h>
 #include <fcntl.h>
+#include <time.h>
 
 /* ------------------------------------------------------------------ */
 /* Mini test framework                                                 */
@@ -1278,6 +1279,182 @@ static void t_many_files(void)
     env_free(&e);
 }
 
+/* ===== From the independent review (31.10.2026) ===== */
+
+/* server: a.txt deleted, b.txt renamed to a.txt -- the revision stays 1,
+ * the file ID changes; must be seen as a remote change */
+static void t_rename_same_revision(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    FakeNode *n;
+    lw(&e, "a.txt", "AAAA-old", T0);
+    lw(&e, "b.txt", "BBBB-valuable", T0);
+    run(&e); run(&e);
+    fake_remove(&e.f, rp(&e, "a.txt"));
+    n = fake_find(&e.f, rp(&e, "b.txt"));
+    free(n->path); n->path = strdup("/r/a.txt"); e.f.global++;
+    run(&e);
+    CHECK(lhas(&e, "a.txt", "BBBB-valuable"));
+    lw(&e, "a.txt", "AAAA-local-edit", T0 + 500);
+    run(&e);
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "AAAA-local-edit") || fake_has(&e.f, rp(&e, "a.txt"), "BBBB-valuable"));
+    env_free(&e);
+}
+
+/* macOS: directory deleted on the server, a .DS_Store in it locally */
+static void t_dsstore_dir_delete(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "d/a.txt", "a", T0);
+    run(&e); run(&e);
+    lw(&e, "d/.DS_Store", "finder", T0);
+    fake_remove(&e.f, rp(&e, "d"));
+    run(&e);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(!lexists(&e, "d"));
+    check_idle(&e);
+    env_free(&e);
+}
+
+/* server directory holds never-synced litter, deleted locally */
+static void t_excluded_remote_in_deleted_dir(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "d/a.txt", "a", T0);
+    run(&e); run(&e);
+    fake_put_data(&e.f, rp(&e, "d/Thumbs.db"), "win", T0);
+    lrm(&e, "d");
+    run(&e);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(fake_find(&e.f, rp(&e, "d")) == NULL);   /* litter goes with its directory */
+    env_free(&e);
+}
+static void t_excl_ac(void)  { t_excluded_remote_in_deleted_dir(FAKE_AMICLOUD); }
+static void t_excl_dav(void) { t_excluded_remote_in_deleted_dir(FAKE_WEBDAV); }
+
+/* S5 nested: whole tree deleted locally, server has d/s/new.txt */
+static void t_s5_nested(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "d/a.txt", "a", T0);
+    lw(&e, "d/s/b.txt", "b", T0);
+    lw(&e, "d/t/c.txt", "c", T0);
+    run(&e); run(&e);
+    lrm(&e, "d");
+    fake_put_data(&e.f, rp(&e, "d/s/new.txt"), "new remote", T0 + 50);
+    run(&e);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(fake_has(&e.f, rp(&e, "d/s/new.txt"), "new remote"));
+    CHECK(lhas(&e, "d/s/new.txt", "new remote"));
+    CHECK(fake_find(&e.f, rp(&e, "d/a.txt")) == NULL);
+    CHECK(fake_find(&e.f, rp(&e, "d/s/b.txt")) == NULL);
+    CHECK(fake_find(&e.f, rp(&e, "d/t")) == NULL);
+    check_idle(&e);
+    env_free(&e);
+}
+static void t_s5n_ac(void)  { t_s5_nested(FAKE_AMICLOUD); }
+static void t_s5n_dav(void) { t_s5_nested(FAKE_WEBDAV); }
+
+/* S5 with a conflicting child (WebDAV): the changed file survives */
+static void t_s5_conflict_child(void)
+{
+    Env e; env_init(&e, FAKE_WEBDAV);
+    lw(&e, "d/a.txt", "a", T0);
+    lw(&e, "d/b.txt", "b", T0);
+    run(&e); run(&e);
+    lrm(&e, "d");
+    fake_put_data(&e.f, rp(&e, "d/a.txt"), "a changed remote", T0 + 50);
+    run(&e);
+    CHECK(fake_has(&e.f, rp(&e, "d/a.txt"), "a changed remote"));
+    CHECK(fake_find(&e.f, rp(&e, "d/b.txt")) == NULL);
+    run(&e);
+    CHECK(fake_has(&e.f, rp(&e, "d/a.txt"), "a changed remote"));
+    env_free(&e);
+}
+
+/* a file deleted locally is changed on the server during the run: the
+ * delete must not take the foreign change along */
+static void delrace_hook(FakeTransport *f, FakeOp op, const char *path, void *ud)
+{
+    (void)ud;
+    if (op == FOP_PUT && strstr(path, "a_upload.txt"))
+        fake_put_data(f, "/r/z_del.txt", "important foreign change", T0 + 900);
+}
+static void t_del_remote_race(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "z_del.txt", "old", T0);
+    run(&e); run(&e);
+    lrm(&e, "z_del.txt");
+    lw(&e, "a_upload.txt", "new", T0 + 10);
+    e.f.hook = delrace_hook;
+    run(&e);
+    e.f.hook = NULL;
+    CHECK(fake_has(&e.f, "/r/z_del.txt", "important foreign change"));
+    run(&e);
+    CHECK(lhas(&e, "z_del.txt", "important foreign change") ||
+          fake_has(&e.f, "/r/z_del.txt", "important foreign change"));
+    env_free(&e);
+}
+static void t_delrace_ac(void)  { t_del_remote_race(FAKE_AMICLOUD); }
+static void t_delrace_dav(void) { t_del_remote_race(FAKE_WEBDAV); }
+
+/* a new file appears in a directory that is about to be deleted on the
+ * server (WebDAV DELETE is recursive) */
+static void dirrace_hook(FakeTransport *f, FakeOp op, const char *path, void *ud)
+{
+    (void)ud;
+    if (op == FOP_PUT && strstr(path, "a_upload.txt"))
+        fake_put_data(f, "/r/d/late.txt", "added during the run", T0 + 900);
+}
+static void t_dir_delete_race_dav(void)
+{
+    Env e; env_init(&e, FAKE_WEBDAV);
+    lw(&e, "d/x.txt", "x", T0);
+    run(&e); run(&e);
+    lrm(&e, "d");
+    lw(&e, "a_upload.txt", "new", T0 + 10);
+    e.f.hook = dirrace_hook;
+    run(&e);
+    e.f.hook = NULL;
+    CHECK(fake_has(&e.f, "/r/d/late.txt", "added during the run"));
+    env_free(&e);
+}
+
+/* a missing local root whose parent is gone too (unmounted drive) */
+static void t_local_parent_missing(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    char deep[700];
+    fake_put_data(&e.f, rp(&e, "a.txt"), "a", T0);
+    snprintf(deep, sizeof(deep), "%s/notmounted/Sync", e.base);
+    {
+        Progress pr; SyncOptions o;
+        memset(&pr, 0, sizeof(pr));
+        sync_options_init(&o);
+        cloudsync_run_ex(&e.f.t, deep, e.remote, &o, &pr, &e.s);
+    }
+    CHECK(e.s.aborted);
+    CHECK(!localfs_exists(deep));
+    env_free(&e);
+}
+
+/* S11 speed: 8000 files must not take quadratic time */
+static void t_perf_8000(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    char rel[64]; int i; time_t t0;
+    for (i = 0; i < 8000; i++) {
+        snprintf(rel, sizeof(rel), "d%02d/f%05d.txt", i % 40, i);
+        fake_put_data(&e.f, rp(&e, rel), "x", T0);
+    }
+    t0 = time(NULL);
+    run(&e);
+    CHECK_EQ(e.s.downloaded, 8000);
+    CHECK(time(NULL) - t0 < 20);
+    env_free(&e);
+}
+
 /* ------------------------------------------------------------------ */
 typedef struct { const char *name; void (*fn)(void); const char *risk; } Test;
 
@@ -1324,6 +1501,18 @@ static const Test tests[] = {
     { "S12: 2000 Dateien",                           t_many_files, NULL },
     { "S11: Zwischenstand bei langem Lauf",          t_checkpoint, NULL },
     { "S15: zu lange Namen uebersprungen",           t_long_names, NULL },
+    { "Pruefung: Umbenennen bei gleicher Revision",  t_rename_same_revision, NULL },
+    { "Pruefung: .DS_Store im geloeschten Ordner",   t_dsstore_dir_delete, NULL },
+    { "Pruefung: Ausgeschlossenes im Ordner (AmiCloud)", t_excl_ac, NULL },
+    { "Pruefung: Ausgeschlossenes im Ordner (WebDAV)",   t_excl_dav, NULL },
+    { "Pruefung: S5 verschachtelt (AmiCloud)",       t_s5n_ac, NULL },
+    { "Pruefung: S5 verschachtelt (WebDAV)",         t_s5n_dav, NULL },
+    { "Pruefung: S5 mit Konfliktdatei",              t_s5_conflict_child, NULL },
+    { "Pruefung: Loeschen gegen fremde Aenderung (AmiCloud)", t_delrace_ac, NULL },
+    { "Pruefung: Loeschen gegen fremde Aenderung (WebDAV)",   t_delrace_dav, NULL },
+    { "Pruefung: WebDAV-Ordner bekommt waehrend des Laufs Neues", t_dir_delete_race_dav, NULL },
+    { "Pruefung: lokales Laufwerk fehlt",            t_local_parent_missing, NULL },
+    { "Pruefung: 8000 Dateien",                      t_perf_8000, NULL },
     { "kaputter Stand (AmiCloud)",                   t_corrupt_baseline_ac, NULL },
     { "AmiCloud: Ordner-Loeschen behaelt neue Datei", t_ac_dir_delete_keeps_new_file, NULL },
     { "S2: Abbruch mitten im Lauf",                  t_break_mid_run, NULL },
