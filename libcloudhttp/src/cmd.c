@@ -99,7 +99,7 @@ static const char *jstr(const JSON_Object *obj, const char *key)
 
 static long jlong(const JSON_Object *obj, const char *key)
 {
-    return (long)json_object_get_number(obj, key);
+    return AC_DTOL(json_object_get_number(obj, key));
 }
 
 /* Amiga-Protection-Bits als "hsparwed"-Maske (rwed: Bit gesetzt = verboten) */
@@ -821,9 +821,9 @@ int cmd_put_cond(const AcConfig *cfg, const char *local_path, const char *remote
     if (ok && info) {
         const char *m = json_object_get_string(root, "md5");
         memset(info, 0, sizeof(*info));
-        info->revision = (long)json_object_get_number(root, "revision");
-        info->id       = (long)json_object_get_number(root, "id");
-        info->mtime    = (long)json_object_get_number(root, "mtime");
+        info->revision = AC_DTOL(json_object_get_number(root, "revision"));
+        info->id       = AC_DTOL(json_object_get_number(root, "id"));
+        info->mtime    = AC_DTOL(json_object_get_number(root, "mtime"));
         if (m) strncpy(info->md5, m, sizeof(info->md5) - 1);
     }
     if (root_val) json_value_free(root_val);

@@ -31,6 +31,12 @@
 #include <string.h>
 
 #include "version.h"   /* AC_VERSION, AC_DATE */
+/* A JSON number (double) to long, rounded. Never cast directly: the 68k
+ * soft-float library (-lmieee) reads "986" as 985.999999999999 and prints
+ * 986.0 that way too, so a plain (long) cast turns IDs, revisions and
+ * sizes into the next smaller number. */
+#define AC_DTOL(d) ((long)((d) < 0 ? (d) - 0.5 : (d) + 0.5))
+
 #ifndef AC_MAX_PATH
 #define AC_MAX_PATH 1024
 #endif

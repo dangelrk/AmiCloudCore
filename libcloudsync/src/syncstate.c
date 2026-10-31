@@ -61,7 +61,7 @@ int syncstate_load(const char *local_root, SyncState *st)
     if (!root_val) return 1; /* no baseline yet -- first sync, not an error */
 
     root = json_value_get_object(root_val);
-    if (!root || (int)json_object_get_number(root, "format") != SYNCSTATE_FORMAT) {
+    if (!root || AC_DTOL(json_object_get_number(root, "format")) != SYNCSTATE_FORMAT) {
         json_value_free(root_val);   /* other format: start over, no migration */
         return 1;
     }
@@ -71,7 +71,7 @@ int syncstate_load(const char *local_root, SyncState *st)
         return 0;
     }
 
-    st->global_revision = (long)json_object_get_number(root, "global_revision");
+    st->global_revision = AC_DTOL(json_object_get_number(root, "global_revision"));
     st->had_conflicts   = (json_object_get_boolean(root, "had_conflicts") == 1);
 
     entries = json_object_get_array(root, "entries");
@@ -82,14 +82,14 @@ int syncstate_load(const char *local_root, SyncState *st)
         if (!p) continue;
         syncstate_upsert(st, p,
                         json_object_get_boolean(e, "is_dir") == 1,
-                        (long)json_object_get_number(e, "size"),
-                        (long)json_object_get_number(e, "mtime"),
+                        AC_DTOL(json_object_get_number(e, "size")),
+                        AC_DTOL(json_object_get_number(e, "mtime")),
                         json_object_get_string(e, "md5"),
                         json_object_get_string(e, "token"), /* NULL on an old,
                                                               * pre-WebDAV baseline file -- upsert treats that the same as "" */
-                        (long)json_object_get_number(e, "revision"),
-                        (long)json_object_get_number(e, "server_id"),
-                        (long)json_object_get_number(e, "last_sync"));
+                        AC_DTOL(json_object_get_number(e, "revision")),
+                        AC_DTOL(json_object_get_number(e, "server_id")),
+                        AC_DTOL(json_object_get_number(e, "last_sync")));
     }
 
     json_value_free(root_val);
