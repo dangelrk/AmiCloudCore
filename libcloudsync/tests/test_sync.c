@@ -600,6 +600,8 @@ static void t_delta_shortcut_ac(void)
     lw(&e, "a.txt", "alpha", T0);
     lw(&e, "d/b.txt", "beta", T0);
     run(&e);
+    run(&e);   /* S9: own uploads moved the counter -> one full scan */
+    CHECK(e.f.calls[FOP_LIST] > 0);
     run(&e);
     CHECK_EQ(e.f.calls[FOP_LIST], 0);
     lw(&e, "c.txt", "new local", T0);   /* a local change still uploads */
@@ -848,10 +850,39 @@ static void r_failed_download_never_retried(void)
     fake_fail(&e.f, FOP_GET, NULL);
     run(&e);
     CHECK(lhas(&e, "a.txt", "v2 remote"));
-    lw(&e, "a.txt", "v3 local", T0 + 200);
+    env_free(&e);
+}
+
+/* S2: a break during the transfers stops the run: no deletions, the
+ * baseline keeps what was done, the next run completes the rest */
+static void break_hook(FakeTransport *f, FakeOp op, const char *path, void *ud)
+{
+    (void)f; (void)path; (void)ud;
+    if (op == FOP_PUT) ui_break_set();
+}
+
+static void t_break_mid_run(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "old.txt", "to be deleted", T0);
     run(&e);
-    CHECK(e.s.conflicts > 0 || lhas(&e, "a.txt", "v2 remote"));
-    CHECK(!fake_has(&e.f, rp(&e, "a.txt"), "v3 local") || e.s.conflicts > 0);
+    lrm(&e, "old.txt");
+    lw(&e, "a.txt", "alpha", T0);
+    lw(&e, "b.txt", "beta", T0);
+    e.f.hook = break_hook;
+    run(&e);
+    e.f.hook = NULL;
+    ui_break_clear();
+    CHECK(e.s.aborted);
+    CHECK_EQ(e.f.calls[FOP_PUT], 1);
+    CHECK_EQ(e.f.calls[FOP_DEL], 0);
+    CHECK(fake_has(&e.f, rp(&e, "old.txt"), "to be deleted"));
+    run(&e);
+    CHECK(!e.s.aborted);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "alpha"));
+    CHECK(fake_has(&e.f, rp(&e, "b.txt"), "beta"));
+    CHECK(fake_find(&e.f, rp(&e, "old.txt")) == NULL);
     env_free(&e);
 }
 
@@ -971,16 +1002,17 @@ static const Test tests[] = {
     { "Stand speichern/laden",                       t_syncstate_roundtrip, NULL },
     { "kaputter Stand (AmiCloud)",                   t_corrupt_baseline_ac, NULL },
     { "AmiCloud: Ordner-Loeschen behaelt neue Datei", t_ac_dir_delete_keeps_new_file, NULL },
+    { "S2: Abbruch mitten im Lauf",                  t_break_mid_run, NULL },
 
-    { "list-Fehler loescht lokalen Teilbaum (WebDAV)",   r_list_error_deletes_local,     "S1" },
-    { "list-Fehler loescht lokalen Teilbaum (AmiCloud)", r_list_error_deletes_local_ac,  "S1" },
-    { "unlesbarer lokaler Ordner loescht auf Server",    r_opendir_error_deletes_remote, "S1" },
+    { "S1: list-Fehler bricht ab (WebDAV)",   r_list_error_deletes_local,     NULL },
+    { "S1: list-Fehler bricht ab (AmiCloud)", r_list_error_deletes_local_ac,  NULL },
+    { "S1: unlesbarer lokaler Ordner bricht ab",    r_opendir_error_deletes_remote, NULL },
     { "WebDAV-Ordner-Loeschen nimmt neue Datei mit",     r_dav_dir_delete_takes_new_file, "S5" },
     { "anderer Server-Ordner loescht lokale Dateien",    r_identity_change_deletes_local, "S3" },
-    { "Abbruch wird ignoriert",                          r_break_ignored,                "S2" },
+    { "S2: Abbruch vor dem Lauf",                          r_break_ignored,                NULL },
     { "Gross/Klein-Kollision",                           r_case_collision,               "S6" },
-    { "global_revision erst am Laufende gelesen",        r_global_rev_at_end,            "S9" },
-    { "fehlgeschlagener Download nie wiederholt",       r_failed_download_never_retried, "S14" },
+    { "S9: fremde Aenderung waehrend des Laufs",        r_global_rev_at_end,            NULL },
+    { "S14: fehlgeschlagener Download wiederholt",       r_failed_download_never_retried, NULL },
     { "Download ueberschreibt frische Aenderung",        r_download_overwrites_fresh_edit, "S7" },
     { "Upload ueberschreibt fremde Aenderung",           r_upload_overwrites_remote_change, "S8" },
 };

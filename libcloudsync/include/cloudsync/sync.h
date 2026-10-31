@@ -33,7 +33,12 @@
 #include "transport.h"
 #include <stddef.h>
 
-typedef struct { int uploaded, downloaded, unchanged, deleted, conflicts, errors; } SyncSummary;
+typedef struct {
+    int uploaded, downloaded, unchanged, deleted, conflicts, errors;
+    /* 1 if the run stopped early: scan error, out of memory (nothing was
+     * changed) or a break (the rest follows with the next run). */
+    int aborted;
+} SyncSummary;
 
 /* Reconciles local_root and remote_root via a 3-way diff against
  * syncstate.h's persistent baseline (see sync.c for the full decision

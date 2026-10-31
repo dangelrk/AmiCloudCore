@@ -77,20 +77,25 @@ static char *sync_dupstr(const char *s)
 
 static void index_init(SyncIndex *idx) { idx->items = NULL; idx->n = 0; idx->cap = 0; }
 
-static void index_add(SyncIndex *idx, const char *path, int is_dir,
-                      long size, long mtime, const char *md5, const char *token,
-                      long revision, long id)
+/* 0 on out-of-memory: a path missing from an index would look deleted on
+ * that side, so the caller must treat this as fatal (S1). */
+static int index_add(SyncIndex *idx, const char *path, int is_dir,
+                     long size, long mtime, const char *md5, const char *token,
+                     long revision, long id)
 {
     SyncEntry *e;
+    char *p;
     if (idx->n == idx->cap) {
         int newcap = idx->cap ? idx->cap * 2 : 64;
         SyncEntry *tmp = (SyncEntry *)realloc(idx->items, sizeof(SyncEntry) * (size_t)newcap);
-        if (!tmp) return;
+        if (!tmp) return 0;
         idx->items = tmp;
         idx->cap = newcap;
     }
+    p = sync_dupstr(path);
+    if (!p) return 0;
     e = &idx->items[idx->n++];
-    e->path = sync_dupstr(path);
+    e->path = p;
     e->is_dir = is_dir;
     e->size = size;
     e->mtime = mtime;
@@ -100,6 +105,7 @@ static void index_add(SyncIndex *idx, const char *path, int is_dir,
     e->token[sizeof(e->token) - 1] = '\0';
     e->revision = revision;
     e->id = id;
+    return 1;
 }
 
 static void index_free(SyncIndex *idx)
@@ -124,9 +130,15 @@ static int syncstate_entry_cmp(const void *a, const void *b)
  * per subdirectory. Relative paths so a plain strcmp() sort always puts
  * a directory right before its own children (a string is always < any
  * string it's a strict prefix of). Goes through the transport, not any
- * one wire protocol -- see transport.h. */
-static void index_remote_tree_sync(SyncTransport *t, const char *remote_root,
-                                   const char *rel_prefix, SyncIndex *idx)
+ * one wire protocol -- see transport.h.
+ *
+ * Returns 0 as soon as one listing fails (or memory runs out), with the
+ * failing remote path in errpath. A partial index must never be used: an
+ * unlisted subtree would look deleted remotely and its local copy would
+ * be deleted (S1). */
+static int index_remote_tree_sync(SyncTransport *t, const char *remote_root,
+                                  const char *rel_prefix, SyncIndex *idx,
+                                  char *errpath, size_t errsz)
 {
     SyncRemoteEntry *entries;
     int n, i;
@@ -139,7 +151,10 @@ static void index_remote_tree_sync(SyncTransport *t, const char *remote_root,
         remote_path[sizeof(remote_path) - 1] = '\0';
     }
 
-    if (!t->list(t, remote_path, &entries, &n)) return;
+    if (!t->list(t, remote_path, &entries, &n)) {
+        snprintf(errpath, errsz, "%s", remote_path);
+        return 0;
+    }
     for (i = 0; i < n; i++) {
         char relchild[AC_MAX_PATH];
         if (rel_prefix[0])
@@ -148,11 +163,17 @@ static void index_remote_tree_sync(SyncTransport *t, const char *remote_root,
             strncpy(relchild, entries[i].name, sizeof(relchild) - 1);
             relchild[sizeof(relchild) - 1] = '\0';
         }
-        index_add(idx, relchild, entries[i].is_dir, entries[i].size, entries[i].mtime,
-                 entries[i].md5, entries[i].token, entries[i].revision, entries[i].id);
-        if (entries[i].is_dir) index_remote_tree_sync(t, remote_root, relchild, idx);
+        if (!index_add(idx, relchild, entries[i].is_dir, entries[i].size, entries[i].mtime,
+                       entries[i].md5, entries[i].token, entries[i].revision, entries[i].id) ||
+            (entries[i].is_dir &&
+             !index_remote_tree_sync(t, remote_root, relchild, idx, errpath, errsz))) {
+            if (!errpath[0]) snprintf(errpath, errsz, "%s (kein Speicher)", remote_path);
+            free(entries);
+            return 0;
+        }
     }
     free(entries);
+    return 1;
 }
 
 /* Delta-optimisation fast path (see cloudsync_run()): when the server's
@@ -160,13 +181,16 @@ static void index_remote_tree_sync(SyncTransport *t, const char *remote_root,
  * remote tree is by definition identical to what it was back then --
  * reuse the baseline itself as the remote index instead of a full
  * recursive `list` scan. */
-static void index_remote_from_baseline(SyncState *baseline, SyncIndex *idx)
+static int index_remote_from_baseline(SyncState *baseline, SyncIndex *idx)
 {
     int i;
     for (i = 0; i < baseline->n; i++) {
         const SyncStateEntry *e = &baseline->items[i];
-        index_add(idx, e->path, e->is_dir, e->size, e->mtime, e->md5, e->token, e->revision, e->server_id);
+        if (!index_add(idx, e->path, e->is_dir, e->size, e->mtime, e->md5, e->token,
+                       e->revision, e->server_id))
+            return 0;
     }
+    return 1;
 }
 
 /* Timestamps count as equal within +/-2s — FAT resolution, Amiga ticks,
@@ -185,9 +209,14 @@ static int mtimes_equal(long a, long b)
  * MD5 cache (AmiOwnCloud docs/design/07_Sync_Metadaten.md): a file whose size
  * AND mtime still match its baseline entry is presumed unchanged and
  * reuses the baseline's cached hash instead of rehashing; only a file
- * that actually looks different gets a fresh md5_file_hex(). */
-static void index_local_tree_sync(const char *local_root, const char *rel_prefix,
-                                  SyncIndex *idx, SyncState *baseline)
+ * that actually looks different gets a fresh md5_file_hex().
+ *
+ * Returns 0 if a directory cannot be read (or memory runs out), with the
+ * failing local path in errpath -- an unreadable subtree would otherwise
+ * look deleted locally and be deleted on the server (S1). */
+static int index_local_tree_sync(const char *local_root, const char *rel_prefix,
+                                 SyncIndex *idx, SyncState *baseline,
+                                 char *errpath, size_t errsz)
 {
     LocalDir *d;
     LocalDirEntry e;
@@ -201,7 +230,10 @@ static void index_local_tree_sync(const char *local_root, const char *rel_prefix
     }
 
     d = localfs_opendir(local_path);
-    if (!d) return;
+    if (!d) {
+        snprintf(errpath, errsz, "%s", local_path);
+        return 0;
+    }
     while (localfs_readdir(d, &e)) {
         char relchild[AC_MAX_PATH];
         char md5hex[33];
@@ -234,10 +266,16 @@ static void index_local_tree_sync(const char *local_root, const char *rel_prefix
             }
         }
 
-        index_add(idx, relchild, e.is_dir, e.size, e.mtime, md5hex, NULL, 0, 0);
-        if (e.is_dir) index_local_tree_sync(local_root, relchild, idx, baseline);
+        if (!index_add(idx, relchild, e.is_dir, e.size, e.mtime, md5hex, NULL, 0, 0) ||
+            (e.is_dir &&
+             !index_local_tree_sync(local_root, relchild, idx, baseline, errpath, errsz))) {
+            if (!errpath[0]) snprintf(errpath, errsz, "%s (kein Speicher)", local_path);
+            localfs_closedir(d);
+            return 0;
+        }
     }
     localfs_closedir(d);
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -256,11 +294,14 @@ typedef struct {
     long mtime; /* target mtime after copy/alignment */
     long size;  /* UPLOAD/DOWNLOAD only, for the byte-percentage */
     int  failed; /* set in Pass 2 on failure -- triggers a baseline rollback */
+    int  skipped;/* not executed (break) -- rolled back like a failure */
 } SyncAction;
 
-typedef struct { SyncAction *items; int n, cap; } SyncActions;
+/* oom: an action could not be queued. Its baseline entry is predicted
+ * anyway, so the run must not execute or save anything (S1). */
+typedef struct { SyncAction *items; int n, cap, oom; } SyncActions;
 
-static void actions_init(SyncActions *a) { a->items = NULL; a->n = 0; a->cap = 0; }
+static void actions_init(SyncActions *a) { a->items = NULL; a->n = 0; a->cap = 0; a->oom = 0; }
 
 static SyncAction *actions_add(SyncActions *a, SyncActionType type)
 {
@@ -268,7 +309,7 @@ static SyncAction *actions_add(SyncActions *a, SyncActionType type)
     if (a->n == a->cap) {
         int newcap = a->cap ? a->cap * 2 : 32;
         SyncAction *tmp = (SyncAction *)realloc(a->items, sizeof(SyncAction) * (size_t)newcap);
-        if (!tmp) return NULL;
+        if (!tmp) { a->oom = 1; return NULL; }
         a->items = tmp; a->cap = newcap;
     }
     act = &a->items[a->n++];
@@ -417,12 +458,18 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
     SyncAction  **del_ptrs;
     long        server_global = 0;
     long        now;
-    int         status_ok, use_baseline_as_remote;
+    int         status_ok, use_baseline_as_remote, scan_ok;
+    int         stopped = 0;   /* break (Ctrl-C) seen: run nothing more */
+    int         incomplete = 0;/* some action failed or was skipped */
     int         ri, li, bi, i, del_n;
     char        summary[256];
+    char        errpath[AC_MAX_PATH];
 
     memset(out, 0, sizeof(*out));
     now = (long)time(NULL);
+    actions_init(&acts);
+    memset(&new_st, 0, sizeof(new_st));
+    index_init(&ridx); index_init(&lidx);
 
     if (verbose)
         ui_notify(UI_INFO, "Sync: %s <-> %s%s", local_root, remote_root,
@@ -461,18 +508,31 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
     use_baseline_as_remote = status_ok && !old_st.had_conflicts &&
                             (server_global == old_st.global_revision);
 
-    index_init(&ridx); index_init(&lidx);
+    /* S1: both trees must be scanned completely, or nothing happens at
+     * all -- a missing subtree would otherwise look deleted. */
+    errpath[0] = '\0';
     if (use_baseline_as_remote)
-        index_remote_from_baseline(&old_st, &ridx);
+        scan_ok = index_remote_from_baseline(&old_st, &ridx);
     else
-        index_remote_tree_sync(t, remote_root, "", &ridx);
-    index_local_tree_sync(local_root, "", &lidx, &old_st);
+        scan_ok = index_remote_tree_sync(t, remote_root, "", &ridx, errpath, sizeof(errpath));
+    if (scan_ok)
+        scan_ok = index_local_tree_sync(local_root, "", &lidx, &old_st, errpath, sizeof(errpath));
+    if (!scan_ok) {
+        ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: %s nicht lesbar",
+                  errpath[0] ? errpath : "(kein Speicher)");
+        ac_log_printf("sync: Scan fehlgeschlagen (%s) -- Abbruch ohne Aenderungen\n", errpath);
+        out->errors++;
+        out->aborted = 1;
+        goto out_free;
+    }
+    /* S2: Ctrl-C during the scan -- stop before anything changes */
+    if (ui_break_pending()) {
+        ui_notify(UI_WARN, "Abgleich abgebrochen, nichts geaendert");
+        out->aborted = 1;
+        goto out_free;
+    }
     qsort(ridx.items, (size_t)ridx.n, sizeof(SyncEntry), sync_entry_cmp);
     qsort(lidx.items, (size_t)lidx.n, sizeof(SyncEntry), sync_entry_cmp);
-
-    actions_init(&acts);
-    memset(&new_st, 0, sizeof(new_st));
-    new_st.global_revision = status_ok ? server_global : old_st.global_revision;
 
     /* Pass 1: 3-way merge-scan over Remote (ridx) / Local (lidx) /
      * Baseline (old_st), all keyed by the same relative path -- decide
@@ -644,6 +704,17 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
     }
     index_free(&ridx); index_free(&lidx);
 
+    /* An action that could not be queued still has its predicted baseline
+     * entry -- saving that would e.g. record an upload that never
+     * happened, and the next run would delete the local file. */
+    if (acts.oom) {
+        ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: kein Speicher");
+        ac_log_printf("sync: kein Speicher fuer die Aktionsliste -- Abbruch\n");
+        out->errors++;
+        out->aborted = 1;
+        goto out_free;
+    }
+
     /* Pass 2a: mkdir/upload/download/align, same order and progress
      * bookkeeping as before this rewrite. */
     progress_reset(pr);
@@ -656,6 +727,10 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
 
     for (i = 0; i < acts.n; i++) {
         SyncAction *act = &acts.items[i];
+        /* S2: after a break nothing more runs; the skipped actions are
+         * rolled back in the baseline and redone by the next run. */
+        if (!dry_run && !stopped && ui_break_pending()) stopped = 1;
+        if (stopped) { act->skipped = 1; continue; }
         switch (act->type) {
         case SA_MKDIR_LOCAL:
             if (dry_run) { if (verbose) ui_notify(UI_INFO, "(waere angelegt, lokal)   %s", act->lpath); }
@@ -761,6 +836,9 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
 
         for (i = 0; i < del_n; i++) {
             SyncAction *act = del_ptrs[i];
+            /* S2: a stopped run never deletes */
+            if (!dry_run && !stopped && ui_break_pending()) stopped = 1;
+            if (stopped) { act->skipped = 1; continue; }
             if (dry_run) {
                 if (verbose)
                     ui_notify(UI_INFO, "(waere geloescht, %s)     %s",
@@ -787,21 +865,27 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
      * predicted entry for anything that didn't actually happen, then
      * persist -- never on a dry run, never advanced past a failed path. */
     for (i = 0; i < acts.n; i++) {
-        if (acts.items[i].failed)
+        if (acts.items[i].failed || acts.items[i].skipped) {
+            incomplete = 1;
             rollback_baseline_entry(&new_st, &old_st, acts.items[i].relpath);
+        }
+    }
+    if (stopped) {
+        out->aborted = 1;
+        ui_notify(UI_WARN, "Abgleich abgebrochen, der Rest folgt beim naechsten Lauf");
     }
 
-    if (!dry_run) {
-        /* Re-query global_revision now rather than reuse the pre-sync
-         * value: if THIS run itself uploaded/deleted/mkdir'd anything
-         * remotely, the counter already moved past what we captured at
-         * the top -- recording the stale value would just cost the next
-         * run one wasted full rescan before the delta-optimisation
-         * catches up on its own. Not a correctness fix, purely keeps the
-         * shortcut effective sync-over-sync. */
-        long final_global;
-        if (t->global_rev(t, &final_global)) new_st.global_revision = final_global;
+    /* S9: the counter as of the START of this run -- a change made by
+     * someone else while this run was busy is newer than that and makes
+     * the next run scan fully. Own changes cost one full rescan, where
+     * the hashes recognise them as already known.
+     * S14: after any failed or skipped action the old counter stays, so
+     * the next run scans fully and retries (a failed download would
+     * otherwise never be seen again). */
+    new_st.global_revision = (status_ok && !incomplete) ? server_global
+                                                        : old_st.global_revision;
 
+    if (!dry_run) {
         if (!syncstate_save(local_root, &new_st)) {
             if (verbose)
                 ui_notify(UI_WARN, "amicloudcore: sync: could not write %s -- next sync will rescan fully",
@@ -811,6 +895,8 @@ void cloudsync_run_t(SyncTransport *t, const char *local_root, const char *remot
         }
     }
 
+out_free:
+    index_free(&ridx); index_free(&lidx);
     syncstate_free(&old_st);
     syncstate_free(&new_st);
     actions_free(&acts);
