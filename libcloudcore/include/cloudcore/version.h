@@ -18,7 +18,7 @@
 #ifndef CLOUDCORE_VERSION_H
 #define CLOUDCORE_VERSION_H
 
-#define AC_VERSION "0.1"         /* version.revision, both numbers */
+#define AC_VERSION "0.2"         /* version.revision, both numbers */
 #define AC_DATE    "31.10.2026"  /* release date, dd.mm.yyyy */
 
 #endif
