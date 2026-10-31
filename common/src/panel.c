@@ -26,10 +26,13 @@
 /* ------------------------------------------------------------------ */
 /* Remote path resolution (moved verbatim from shell.c)                 */
 /* ------------------------------------------------------------------ */
+/* one level up; never above the root -- "/" stays "/" (going up from
+ * "/x" used to leave "" and the next segment then made a RELATIVE path) */
 static void path_pop(char *p)
 {
     char *slash = strrchr(p, '/');
-    if (slash) *slash = '\0';
+    if (slash == p) p[1] = '\0';
+    else if (slash) *slash = '\0';
     else p[0] = '\0';
 }
 
@@ -79,7 +82,10 @@ void remote_resolve(char *out, size_t outsz, const char *cwd, const char *input)
 
     /* General case: a (possibly relative, possibly '..'-containing) path. */
     rest = input;
-    if (input[0] == '/') {
+    if (is_amiga && input[0] == ':') {
+        work[0] = '/'; work[1] = '\0';   /* AmigaDOS ":dir" = from the root */
+        rest = input + 1;
+    } else if (input[0] == '/') {
         if (is_amiga) {
             strncpy(work, cwd, sizeof(work) - 1); work[sizeof(work) - 1] = '\0';
             while (*rest == '/') { path_pop(work); rest++; }

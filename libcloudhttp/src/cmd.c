@@ -917,7 +917,7 @@ int cmd_put_checked(const AcConfig *cfg, const char *local_path,
                       "give the target path including the file name", disp(rpath));
             return 1;
         }
-        if (state == 1 && !ui_confirm("'%s' already exists on the server. Overwrite?", rpath)) {
+        if (state == 1 && !ui_confirm("'%s' already exists on the server. Overwrite?", disp(rpath))) {
             ui_notify(UI_WARN, "amicloudcore: put: '%s' not overwritten", disp(rpath));
             return 1;
         }
