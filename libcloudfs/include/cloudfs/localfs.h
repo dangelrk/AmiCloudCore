@@ -83,6 +83,10 @@ void localfs_sibling(char *out, size_t sz, const char *path, const char *name);
  * must be on the same volume. Returns 1 on success. */
 int localfs_replace(const char *src, const char *dst);
 
+/* 1 if names in dir are case-sensitive (probe file, see localfs_util.c),
+ * 0 if not or if the probe fails. */
+int localfs_case_sensitive(const char *dir);
+
 /* ------------------------------------------------------------------ */
 /* UTC epoch mtimes for `sync` (plan section 19) — implemented per       */
 /* platform in localfs_pc.c/localfs_amiga.c, like localfs_stat/utime()   */

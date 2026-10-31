@@ -778,6 +778,52 @@ static void r_dav_dir_delete_takes_new_file(void)
     env_free(&e);
 }
 
+/* S5, other direction: a directory deleted on the server while a new
+ * file was added to it locally -- the directory comes back on the
+ * server and the new file is uploaded, nothing is lost */
+static void t_local_new_file_in_remotely_deleted_dir(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "d/a.txt", "a", T0);
+    run(&e); run(&e);
+    fake_remove(&e.f, rp(&e, "d"));
+    lw(&e, "d/new.txt", "added locally", T0 + 100);
+    run(&e);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(lhas(&e, "d/new.txt", "added locally"));
+    CHECK(fake_has(&e.f, rp(&e, "d/new.txt"), "added locally"));
+    CHECK(!lexists(&e, "d/a.txt"));
+    check_idle(&e);
+    env_free(&e);
+}
+static void t_s5_local_ac(void) { t_local_new_file_in_remotely_deleted_dir(FAKE_AMICLOUD); }
+static void t_s5_local_dav(void) { t_local_new_file_in_remotely_deleted_dir(FAKE_WEBDAV); }
+
+/* S13: fixed exclusion list, both sides */
+static void t_exclusions(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, ".DS_Store", "x", T0);
+    lw(&e, "sub/._a.txt", "x", T0);
+    lw(&e, "~$brief.doc", "x", T0);
+    lw(&e, "film.part", "x", T0);
+    lw(&e, "Thumbs.db", "x", T0);
+    lw(&e, "back\\slash.txt", "x", T0);
+    lw(&e, "ok.txt", "ok", T0);
+    fake_put_data(&e.f, rp(&e, "desktop.ini"), "x", T0);
+    fake_put_data(&e.f, rp(&e, "remote.part"), "x", T0);
+    run(&e);
+    CHECK_EQ(e.s.uploaded, 1);
+    CHECK_EQ(e.s.downloaded, 0);
+    CHECK(fake_has(&e.f, rp(&e, "ok.txt"), "ok"));
+    CHECK(!lexists(&e, "desktop.ini"));
+    CHECK(fake_find(&e.f, rp(&e, ".DS_Store")) == NULL);
+    CHECK(sync_name_excluded(".amicloudsync.tmp"));
+    CHECK(!sync_name_excluded("Disk.info"));
+    CHECK(!sync_name_excluded("partitur.txt"));
+    env_free(&e);
+}
+
 /* same scenario on AmiCloud: the server refuses the non-empty delete,
  * nothing is lost (pins today's behaviour, not a RISK test) */
 static void t_ac_dir_delete_keeps_new_file(void)
@@ -848,6 +894,9 @@ static void t_dry_run_new_pair(void)
     env_free(&e);
 }
 
+typedef struct Race { FakeOp op; int fired; Env *e; const char *rel; const char *content; int local; } Race;
+static void race_hook(FakeTransport *f, FakeOp op, const char *path, void *ud);
+
 /* S2: Ctrl-C / Abbrechen is never checked -- a pending break still runs
  * every transfer. */
 static void r_break_ignored(void)
@@ -881,6 +930,59 @@ static void r_case_collision(void)
     run(&e);
     CHECK(fake_has(&e.f, rp(&e, "A.txt"), "upper"));
     CHECK(fake_has(&e.f, rp(&e, "a.txt"), "lower"));
+    CHECK_EQ(e.s.conflicts, 1);
+    CHECK_EQ(e.f.calls[FOP_GET] + e.f.calls[FOP_PUT] + e.f.calls[FOP_DEL], 0);
+    env_free(&e);
+}
+
+static int case_insensitive_fs(Env *e)
+{
+    char p1[1024], p2[1024];
+    int r;
+    lw(e, "CaseProbe", "x", T0);
+    lpath(e, "caseprobe", p1, sizeof(p1));
+    lpath(e, "CaseProbe", p2, sizeof(p2));
+    r = localfs_exists(p1);
+    remove(p2);
+    return r;
+}
+
+/* S6 with directories: "Dir/x" and "dir/y" would land in one local
+ * directory; the next run would move y on the server */
+static void t_case_collision_dirs(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    if (!case_insensitive_fs(&e)) { env_free(&e); SKIP("Dateisystem unterscheidet Gross/Klein"); }
+    fake_put_data(&e.f, rp(&e, "Dir/x.txt"), "x", T0);
+    fake_put_data(&e.f, rp(&e, "dir/y.txt"), "y", T0);
+    fake_put_data(&e.f, rp(&e, "fine.txt"), "fine", T0);
+    run(&e);
+    run(&e);
+    CHECK(fake_has(&e.f, rp(&e, "Dir/x.txt"), "x"));
+    CHECK(fake_has(&e.f, rp(&e, "dir/y.txt"), "y"));
+    CHECK(fake_find(&e.f, rp(&e, "Dir/y.txt")) == NULL);
+    CHECK(lhas(&e, "fine.txt", "fine"));
+    CHECK(!lexists(&e, "Dir"));
+    env_free(&e);
+}
+
+/* S7: a file edited after the scan is not deleted */
+static void t_delete_keeps_fresh_edit(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    Race r;
+    lw(&e, "a.txt", "v1", T0);
+    lw(&e, "b.txt", "b", T0);
+    run(&e);
+    fake_remove(&e.f, rp(&e, "a.txt"));
+    fake_put_data(&e.f, rp(&e, "b.txt"), "b2", T0 + 50);
+    memset(&r, 0, sizeof(r));
+    r.op = FOP_GET; r.e = &e; r.rel = "a.txt"; r.content = "fresh local edit"; r.local = 1;
+    e.f.hook = race_hook; e.f.hook_ud = &r;
+    run(&e);   /* downloads b.txt (hook edits a.txt), then would delete a.txt */
+    e.f.hook = NULL;
+    CHECK(r.fired);
+    CHECK(lhas(&e, "a.txt", "fresh local edit"));
     env_free(&e);
 }
 
@@ -936,7 +1038,6 @@ static void t_break_mid_run(void)
 }
 
 /* hook helpers for the race tests: fire once on the first op of a kind */
-typedef struct { FakeOp op; int fired; Env *e; const char *rel; const char *content; int local; } Race;
 
 static void race_hook(FakeTransport *f, FakeOp op, const char *path, void *ud)
 {
@@ -1052,20 +1153,25 @@ static const Test tests[] = {
     { "kaputter Stand (AmiCloud)",                   t_corrupt_baseline_ac, NULL },
     { "AmiCloud: Ordner-Loeschen behaelt neue Datei", t_ac_dir_delete_keeps_new_file, NULL },
     { "S2: Abbruch mitten im Lauf",                  t_break_mid_run, NULL },
+    { "S5: neue lokale Datei in entfernt geloeschtem Ordner (AmiCloud)", t_s5_local_ac, NULL },
+    { "S5: neue lokale Datei in entfernt geloeschtem Ordner (WebDAV)",   t_s5_local_dav, NULL },
+    { "S13: feste Ausschlussliste",                  t_exclusions, NULL },
 
     { "S1: list-Fehler bricht ab (WebDAV)",   r_list_error_deletes_local,     NULL },
     { "S1: list-Fehler bricht ab (AmiCloud)", r_list_error_deletes_local_ac,  NULL },
     { "S1: unlesbarer lokaler Ordner bricht ab",    r_opendir_error_deletes_remote, NULL },
-    { "WebDAV-Ordner-Loeschen nimmt neue Datei mit",     r_dav_dir_delete_takes_new_file, "S5" },
+    { "S5: WebDAV-Ordner-Loeschen laesst neue Datei",   r_dav_dir_delete_takes_new_file, NULL },
     { "S3: anderer Server-Ordner loescht nichts",       r_identity_change_deletes_local, NULL },
     { "S3: fremdes Stand-Format wird verworfen",        t_foreign_format, NULL },
     { "S4: verschwundene Server-Wurzel bricht ab",      t_remote_root_gone, NULL },
     { "Probelauf eines neuen Paars ohne Server-Ordner", t_dry_run_new_pair, NULL },
     { "S2: Abbruch vor dem Lauf",                          r_break_ignored,                NULL },
-    { "Gross/Klein-Kollision",                           r_case_collision,               "S6" },
+    { "S6: Gross/Klein-Kollision (Dateien)",            r_case_collision,               NULL },
+    { "S6: Gross/Klein-Kollision (Ordner)",             t_case_collision_dirs,          NULL },
     { "S9: fremde Aenderung waehrend des Laufs",        r_global_rev_at_end,            NULL },
     { "S14: fehlgeschlagener Download wiederholt",       r_failed_download_never_retried, NULL },
-    { "Download ueberschreibt frische Aenderung",        r_download_overwrites_fresh_edit, "S7" },
+    { "S7: Download laesst frische Aenderung",          r_download_overwrites_fresh_edit, NULL },
+    { "S7: Loeschen laesst frische Aenderung",          t_delete_keeps_fresh_edit,       NULL },
     { "Upload ueberschreibt fremde Aenderung",           r_upload_overwrites_remote_change, "S8" },
 };
 

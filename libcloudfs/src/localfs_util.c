@@ -62,6 +62,25 @@ void localfs_sibling(char *out, size_t sz, const char *path, const char *name)
     snprintf(out, sz, "%.*s%s", (int)(cut - path + 1), path, name);
 }
 
+/* Probe: create a file with a lower-case name and look for it under the
+ * upper-case one. Any failure counts as case-insensitive, the safe
+ * assumption for sync (AmigaOS, macOS by default and Windows are). */
+int localfs_case_sensitive(const char *dir)
+{
+    char lower[AC_MAX_PATH], upper[AC_MAX_PATH];
+    FILE *fp;
+    int sensitive;
+
+    localfs_join(lower, sizeof(lower), dir, ".amicloudsync.case");
+    localfs_join(upper, sizeof(upper), dir, ".AMICLOUDSYNC.CASE");
+    fp = fopen(lower, "wb");
+    if (!fp) return 0;
+    fclose(fp);
+    sensitive = !localfs_exists(upper);
+    remove(lower);
+    return sensitive;
+}
+
 int localfs_replace(const char *src, const char *dst)
 {
     remove(dst);

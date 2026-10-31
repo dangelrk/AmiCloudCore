@@ -52,6 +52,12 @@ typedef struct {
 
 void sync_options_init(SyncOptions *o);
 
+/* 1 if a file or directory of this name is never synced (S13): the
+ * kernel's own .amicloudsync*, .DS_Store, ._*, Thumbs.db, desktop.ini,
+ * ~$* (Office locks), *.part, names with a backslash or control
+ * characters. Same list on every client. */
+int sync_name_excluded(const char *name);
+
 /* Reconciles local_root and remote_root through transport t via a 3-way
  * diff against syncstate.h's persistent baseline (see sync.c for the
  * full decision matrix): a path changed on only one side transfers in

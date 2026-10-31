@@ -153,6 +153,7 @@ static int index_remote_tree_sync(SyncTransport *t, const char *remote_root,
     }
     for (i = 0; i < n; i++) {
         char relchild[AC_MAX_PATH];
+        if (sync_name_excluded(entries[i].name)) continue;   /* S13 */
         if (rel_prefix[0])
             snprintf(relchild, sizeof(relchild), "%s/%s", rel_prefix, entries[i].name);
         else {
@@ -187,6 +188,106 @@ static int index_remote_from_baseline(SyncState *baseline, SyncIndex *idx)
             return 0;
     }
     return 1;
+}
+
+/* S13: names never synced, on either side and on every client alike:
+ * the kernel's own files, metadata litter of other systems, Office lock
+ * files, partial downloads, and names the server or other systems would
+ * mangle (backslash -- the server turns it into a '/' -- and control
+ * characters). */
+static int ends_with(const char *s, const char *suffix)
+{
+    size_t ls = strlen(s), lx = strlen(suffix);
+    return ls >= lx && strcmp(s + ls - lx, suffix) == 0;
+}
+
+int sync_name_excluded(const char *name)
+{
+    const unsigned char *c;
+    if (strncmp(name, ".amicloudsync", 13) == 0) return 1;
+    if (strcmp(name, ".DS_Store") == 0 || strcmp(name, "Thumbs.db") == 0 ||
+        strcmp(name, "desktop.ini") == 0)
+        return 1;
+    if (strncmp(name, "._", 2) == 0 || strncmp(name, "~$", 2) == 0) return 1;
+    if (ends_with(name, ".part")) return 1;
+    for (c = (const unsigned char *)name; *c; c++)
+        if (*c < 0x20 || *c == 0x7f || *c == '\\') return 1;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* S6: names that differ only in case                                   */
+/* ------------------------------------------------------------------ */
+/* The server keeps "A.txt" and "a.txt" apart, a case-insensitive local
+ * file system (AmigaOS, macOS, Windows) cannot: both would land in one
+ * local file, and the next run would upload the wrong content or delete
+ * one of them remotely. Such paths -- with everything below them -- are
+ * skipped on both sides and reported. ASCII folding only. */
+static void fold_case(char *out, size_t sz, const char *in)
+{
+    size_t i;
+    for (i = 0; in[i] && i + 1 < sz; i++)
+        out[i] = (in[i] >= 'A' && in[i] <= 'Z') ? (char)(in[i] + 32) : in[i];
+    out[i] = '\0';
+}
+
+static int folded_cmp(const void *a, const void *b)
+{
+    char fa[AC_MAX_PATH], fb[AC_MAX_PATH];
+    fold_case(fa, sizeof(fa), (*(const SyncEntry *const *)a)->path);
+    fold_case(fb, sizeof(fb), (*(const SyncEntry *const *)b)->path);
+    return strcmp(fa, fb);
+}
+
+typedef struct { char **items; int n; } CaseSkips;
+
+static void case_skips_free(CaseSkips *cs)
+{
+    int i;
+    for (i = 0; i < cs->n; i++) free(cs->items[i]);
+    free(cs->items);
+    cs->items = NULL; cs->n = 0;
+}
+
+/* Fills cs with the folded paths that occur more than once in idx. 0 on
+ * out of memory. */
+static int find_case_collisions(const SyncIndex *idx, CaseSkips *cs)
+{
+    const SyncEntry **v;
+    int i;
+    cs->items = NULL; cs->n = 0;
+    if (idx->n < 2) return 1;
+    v = (const SyncEntry **)malloc(sizeof(SyncEntry *) * (size_t)idx->n);
+    cs->items = (char **)malloc(sizeof(char *) * (size_t)idx->n);
+    if (!v || !cs->items) { free(v); free(cs->items); cs->items = NULL; return 0; }
+    for (i = 0; i < idx->n; i++) v[i] = &idx->items[i];
+    qsort(v, (size_t)idx->n, sizeof(SyncEntry *), folded_cmp);
+    for (i = 1; i < idx->n; i++) {
+        char f[AC_MAX_PATH];
+        if (folded_cmp(&v[i - 1], &v[i]) != 0) continue;
+        fold_case(f, sizeof(f), v[i]->path);
+        if (cs->n && strcmp(cs->items[cs->n - 1], f) == 0) continue;
+        ui_notify(UI_WARN, "'%s' und '%s' unterscheiden sich nur in Gross-/Kleinschreibung -- "
+                  "beide uebersprungen", v[i - 1]->path, v[i]->path);
+        if (!(cs->items[cs->n] = sync_dupstr(f))) { free(v); return 0; }
+        cs->n++;
+    }
+    free(v);
+    return 1;
+}
+
+/* 1 if path is one of the colliding paths or lies below one */
+static int case_skipped(const CaseSkips *cs, const char *path)
+{
+    char f[AC_MAX_PATH];
+    int i;
+    if (!cs->n) return 0;
+    fold_case(f, sizeof(f), path);
+    for (i = 0; i < cs->n; i++) {
+        size_t l = strlen(cs->items[i]);
+        if (strncmp(f, cs->items[i], l) == 0 && (f[l] == '\0' || f[l] == '/')) return 1;
+    }
+    return 0;
 }
 
 /* Timestamps count as equal within +/-2s — FAT resolution, Amiga ticks,
@@ -242,12 +343,9 @@ static int index_local_tree_sync(const char *local_root, const char *rel_prefix,
             relchild[sizeof(relchild) - 1] = '\0';
         }
 
-        /* Never treat our own baseline file (or its atomic-save tempfile)
-         * as sync content -- otherwise a sync would upload/track itself. */
-        if (!rel_prefix[0] && (strcmp(e.name, SYNCSTATE_FILE) == 0 ||
-                              strcmp(e.name, SYNCSTATE_FILE ".tmp") == 0))
-            continue;
-        if (strcmp(e.name, SYNC_PART_FILE) == 0) continue; /* leftover of an aborted run */
+        /* S13 -- includes our own baseline, its tempfile and the
+         * leftover .part of an aborted download */
+        if (sync_name_excluded(e.name)) continue;
 
         md5hex[0] = '\0';
         if (!e.is_dir) {
@@ -290,7 +388,12 @@ typedef struct {
     long mtime; /* target mtime after copy/alignment */
     long size;  /* UPLOAD/DOWNLOAD only, for the byte-percentage */
     int  failed; /* set in Pass 2 on failure -- triggers a baseline rollback */
-    int  skipped;/* not executed (break) -- rolled back like a failure */
+    int  skipped;/* not executed (break, changed since the scan) -- rolled back */
+    int  is_dir; /* DEL_LOCAL/DEL_REMOTE: a directory */
+    /* DOWNLOAD/DEL_LOCAL: the local file as seen by the scan, re-checked
+     * right before it is replaced or deleted (S7) */
+    int  lexists;
+    long lsize, lmtime;
 } SyncAction;
 
 /* oom: an action could not be queued. Its baseline entry is predicted
@@ -334,8 +437,16 @@ static void queue_upload(SyncActions *acts, const SyncEntry *le, const char *rel
     act->size  = le->size;
 }
 
-static void queue_download(SyncActions *acts, const SyncEntry *re, const char *relpath,
-                          const char *lpath, const char *rpath)
+static void note_local(SyncAction *act, const SyncEntry *le)
+{
+    act->lexists = le != NULL;
+    act->lsize   = le ? le->size : 0;
+    act->lmtime  = le ? le->mtime : 0;
+}
+
+/* le: the local file the download replaces, NULL if there is none */
+static void queue_download(SyncActions *acts, const SyncEntry *re, const SyncEntry *le,
+                          const char *relpath, const char *lpath, const char *rpath)
 {
     SyncAction *act = queue_action(acts, SA_DOWNLOAD, relpath);
     if (!act) return;
@@ -343,6 +454,7 @@ static void queue_download(SyncActions *acts, const SyncEntry *re, const char *r
     strncpy(act->rpath, rpath, sizeof(act->rpath) - 1);
     act->mtime = re->mtime;
     act->size  = re->size;
+    note_local(act, le);
 }
 
 static void queue_mkdir_local(SyncActions *acts, const char *relpath, const char *lpath)
@@ -357,16 +469,117 @@ static void queue_mkdir_remote(SyncActions *acts, const char *relpath, const cha
     if (act) strncpy(act->rpath, rpath, sizeof(act->rpath) - 1);
 }
 
-static void queue_del_local(SyncActions *acts, const char *relpath, const char *lpath)
+/* S7: 1 if the local file is still exactly what the scan saw (or still
+ * absent) -- checked right before it is replaced or deleted. */
+static int local_as_scanned(const SyncAction *act)
 {
-    SyncAction *act = queue_action(acts, SA_DEL_LOCAL, relpath);
-    if (act) strncpy(act->lpath, lpath, sizeof(act->lpath) - 1);
+    long size = 0, mtime = 0;
+    int exists = localfs_stat(act->lpath, &size, &mtime);
+    if (!act->lexists) return !exists;
+    return exists && size == act->lsize && mtime == act->lmtime;
 }
 
-static void queue_del_remote(SyncActions *acts, const char *relpath, const char *rpath)
+/* Both paths are stored: a directory delete may be turned into a mkdir
+ * on the other side (keep_dirs_with_survivors(), S5). */
+static void queue_del_local(SyncActions *acts, const SyncEntry *le, const char *relpath,
+                            const char *lpath, const char *rpath)
+{
+    SyncAction *act = queue_action(acts, SA_DEL_LOCAL, relpath);
+    if (!act) return;
+    strncpy(act->lpath, lpath, sizeof(act->lpath) - 1);
+    strncpy(act->rpath, rpath, sizeof(act->rpath) - 1);
+    act->is_dir = le->is_dir;
+    note_local(act, le);
+}
+
+static void queue_del_remote(SyncActions *acts, const SyncEntry *re, const char *relpath,
+                             const char *lpath, const char *rpath)
 {
     SyncAction *act = queue_action(acts, SA_DEL_REMOTE, relpath);
-    if (act) strncpy(act->rpath, rpath, sizeof(act->rpath) - 1);
+    if (!act) return;
+    strncpy(act->lpath, lpath, sizeof(act->lpath) - 1);
+    strncpy(act->rpath, rpath, sizeof(act->rpath) - 1);
+    act->is_dir = re->is_dir;
+}
+
+static int act_ptr_relpath_cmp(const void *a, const void *b)
+{
+    return strcmp((*(SyncAction *const *)a)->relpath, (*(SyncAction *const *)b)->relpath);
+}
+
+static int entry_path_cmp(const void *key, const void *e)
+{
+    return strcmp((const char *)key, ((const SyncEntry *)e)->path);
+}
+
+/* 1 if a delete action of the given type is queued for relpath. dels is
+ * sorted by relpath and holds every delete action of both types. */
+static int del_queued(SyncAction **dels, int n, SyncActionType type, const char *relpath)
+{
+    SyncAction key, *kp = &key;
+    SyncAction **hit;
+    strncpy(key.relpath, relpath, sizeof(key.relpath) - 1);
+    key.relpath[sizeof(key.relpath) - 1] = '\0';
+    hit = (SyncAction **)bsearch(&kp, dels, (size_t)n, sizeof(SyncAction *), act_ptr_relpath_cmp);
+    return hit && (*hit)->type == type;
+}
+
+/* S5: a directory is only deleted if this run also deletes everything
+ * below it on that side. Otherwise something survives (a file added on
+ * that side since the last sync, or a conflict that is kept) -- a WebDAV
+ * DELETE would take it along, and the plain local remove would fail. The
+ * delete then turns into recreating the directory on the side where it
+ * was deleted, so the survivors can be transferred into it.
+ *
+ * Deepest directories first, so a converted subdirectory already counts
+ * as a survivor of its parent. idx is the side the delete would happen
+ * on (ridx for SA_DEL_REMOTE, lidx for SA_DEL_LOCAL), sorted by path. */
+static void keep_dirs_with_survivors(SyncActions *acts, const SyncIndex *ridx,
+                                     const SyncIndex *lidx, SyncState *new_st, long now,
+                                     const char *verbose_tag)
+{
+    SyncAction **dels;
+    int i, n = 0;
+
+    dels = (SyncAction **)malloc(sizeof(SyncAction *) * (size_t)(acts->n ? acts->n : 1));
+    if (!dels) { acts->oom = 1; return; }
+    for (i = 0; i < acts->n; i++)
+        if (acts->items[i].type == SA_DEL_LOCAL || acts->items[i].type == SA_DEL_REMOTE)
+            dels[n++] = &acts->items[i];
+    qsort(dels, (size_t)n, sizeof(SyncAction *), act_ptr_relpath_cmp);
+
+    for (i = n - 1; i >= 0; i--) {
+        SyncAction *act = dels[i];
+        const SyncIndex *idx;
+        const SyncEntry *d;
+        size_t plen;
+        int k, survivor = 0;
+
+        if (!act->is_dir) continue;
+        idx = (act->type == SA_DEL_REMOTE) ? ridx : lidx;
+        d = (const SyncEntry *)bsearch(act->relpath, idx->items, (size_t)idx->n,
+                                       sizeof(SyncEntry), entry_path_cmp);
+        if (!d) continue;
+        plen = strlen(act->relpath);
+        for (k = (int)(d - idx->items) + 1; k < idx->n; k++) {
+            const char *p = idx->items[k].path;
+            if (strncmp(p, act->relpath, plen) != 0 || p[plen] != '/') break;
+            if (!del_queued(dels, n, act->type, p)) { survivor = 1; break; }
+        }
+        if (!survivor) continue;
+
+        if (verbose_tag)
+            ui_notify(UI_INFO, "%s: Ordner %s bleibt, darin gibt es Neues", verbose_tag, act->relpath);
+        if (act->type == SA_DEL_REMOTE) {
+            act->type = SA_MKDIR_LOCAL;
+            syncstate_upsert(new_st, act->relpath, 1, 0, d->mtime, "", d->token,
+                             d->revision, d->id, now);
+        } else {
+            act->type = SA_MKDIR_REMOTE;
+            syncstate_upsert(new_st, act->relpath, 1, 0, d->mtime, "", "", 1, 0, now);
+        }
+    }
+    free(dels);
 }
 
 /* Content matches on both sides but mtimes drifted -- align both to the
@@ -489,6 +702,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     int         ri, li, bi, i, del_n;
     char        summary[256];
     char        errpath[AC_MAX_PATH];
+    CaseSkips   case_skips = { NULL, 0 };
 
     if (!opts) { sync_options_init(&defaults); opts = &defaults; }
     dry_run = opts->dry_run;
@@ -591,6 +805,19 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     qsort(ridx.items, (size_t)ridx.n, sizeof(SyncEntry), sync_entry_cmp);
     qsort(lidx.items, (size_t)lidx.n, sizeof(SyncEntry), sync_entry_cmp);
 
+    /* S6 (a dry run must not write the probe file: assume insensitive) */
+    if ((dry_run || !localfs_case_sensitive(local_root)) &&
+        !find_case_collisions(&ridx, &case_skips)) {
+        ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: kein Speicher");
+        out->errors++;
+        out->aborted = 1;
+        goto out_free;
+    }
+    if (case_skips.n) {
+        out->conflicts += case_skips.n;
+        new_st.had_conflicts = 1;
+    }
+
     /* Pass 1: 3-way merge-scan over Remote (ridx) / Local (lidx) /
      * Baseline (old_st), all keyed by the same relative path -- decide
      * one action (or none) per path. See AmiOwnCloud docs/design/
@@ -609,6 +836,11 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
         if (re) ri++;
         if (le) li++;
         if (be) bi++;
+
+        if (case_skipped(&case_skips, cur)) {   /* S6: leave all three alone */
+            carry_forward(&new_st, be);
+            continue;
+        }
 
         localfs_join(lpath, sizeof(lpath), local_root, cur);
         snprintf(rpath, sizeof(rpath), "%s/%s", remote_root, cur);
@@ -693,7 +925,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                     syncstate_upsert(&new_st, cur, 0, le->size, le->mtime, le->md5, "",
                                     be->revision + 1, be->server_id, now);
                 } else if (!local_changed && remote_changed) {
-                    queue_download(&acts, re, cur, lpath, rpath);
+                    queue_download(&acts, re, le, cur, lpath, rpath);
                     /* md5 may be "" here (WebDAV) -- Pass 2's SA_DOWNLOAD
                      * case patches it with a real local hash right after
                      * the transfer completes, at zero network cost. */
@@ -716,7 +948,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 else                 unchanged_for_del = (strcmp(le->md5, be->md5) == 0);
 
                 if (unchanged_for_del) {
-                    queue_del_local(&acts, cur, lpath);
+                    queue_del_local(&acts, le, cur, lpath, rpath);
                 } else {
                     report_conflict(verbose, out, &new_st, cur, "deleted remotely but changed locally");
                     carry_forward(&new_st, be);
@@ -741,7 +973,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                     unchanged_for_del = !be->token[0] || (strcmp(re->token, be->token) == 0);
 
                 if (unchanged_for_del) {
-                    queue_del_remote(&acts, cur, rpath);
+                    queue_del_remote(&acts, re, cur, lpath, rpath);
                 } else {
                     report_conflict(verbose, out, &new_st, cur, "deleted locally but changed remotely");
                     carry_forward(&new_st, be);
@@ -750,7 +982,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 queue_mkdir_local(&acts, cur, lpath);
                 syncstate_upsert(&new_st, cur, 1, 0, re->mtime, "", re->token, re->revision, re->id, now);
             } else {
-                queue_download(&acts, re, cur, lpath, rpath);
+                queue_download(&acts, re, NULL, cur, lpath, rpath);
                 /* md5 patched post-transfer in Pass 2, see above. */
                 syncstate_upsert(&new_st, cur, 0, re->size, re->mtime, re->md5, re->token,
                                 re->revision, re->id, now);
@@ -759,6 +991,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
         /* else: !le && !re, only be -- both sides already gone; drop the
          * baseline entry silently (nothing added to new_st), done. */
     }
+    keep_dirs_with_survivors(&acts, &ridx, &lidx, &new_st, now, verbose ? "Sync" : NULL);
     index_free(&ridx); index_free(&lidx);
 
     /* An action that could not be queued still has its predicted baseline
@@ -829,6 +1062,15 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 progress_prefix(pr, act->size);
                 localfs_sibling(part, sizeof(part), act->lpath, SYNC_PART_FILE);
                 got = (t->get(t, act->rpath, part, act->lpath) == 0);
+                if (got && !local_as_scanned(act)) {
+                    /* S7: edited while we were busy -- keep the edit, the
+                     * next run compares again */
+                    remove(part);
+                    act->skipped = 1;
+                    ui_notify(UI_WARN, "%s wurde waehrend des Abgleichs geaendert -- uebersprungen",
+                              act->lpath);
+                    break;
+                }
                 if (got && !localfs_replace(part, act->lpath)) {
                     ac_log_printf("sync: cannot replace %s\n", act->lpath);
                     got = 0;
@@ -901,6 +1143,10 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                     ui_notify(UI_INFO, "(waere geloescht, %s)     %s",
                              act->type == SA_DEL_LOCAL ? "lokal" : "remote", act->relpath);
                 out->deleted++;
+            } else if (act->type == SA_DEL_LOCAL && !act->is_dir && !local_as_scanned(act)) {
+                act->skipped = 1;   /* S7: changed since the scan -- keep it */
+                ui_notify(UI_WARN, "%s wurde waehrend des Abgleichs geaendert -- nicht geloescht",
+                          act->lpath);
             } else if (act->type == SA_DEL_LOCAL) {
                 if (localfs_remove(act->lpath)) out->deleted++;
                 else {
@@ -953,6 +1199,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     }
 
 out_free:
+    case_skips_free(&case_skips);
     index_free(&ridx); index_free(&lidx);
     syncstate_free(&old_st);
     syncstate_free(&new_st);
