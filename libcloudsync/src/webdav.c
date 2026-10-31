@@ -340,6 +340,10 @@ static int parse_multistatus(const char *xml, SyncRemoteEntry **out, int *out_n)
             if (tl >= 2 && token[0] == '"' && token[tl - 1] == '"') {
                 memmove(token, token + 1, tl - 2);
                 token[tl - 2] = '\0';
+            } else if (tl >= 12 && strncmp(token, "&quot;", 6) == 0 &&
+                       strcmp(token + tl - 6, "&quot;") == 0) {   /* XML-escaped */
+                memmove(token, token + 6, tl - 12);
+                token[tl - 12] = '\0';
             }
         }
         strncpy(arr[n].token, token, sizeof(arr[n].token) - 1);
@@ -454,7 +458,9 @@ static int webdav_put(SyncTransport *t, const char *local_path,
     /* S8: If-Match with the ETag seen at the last sync, or If-None-Match
      * for a file that must not exist yet (RFC 7232, 412 otherwise). */
     if (cond && cond->if_token && cond->if_token[0])
-        snprintf(hdr, sizeof(hdr), "X-OC-Mtime: %ld\r\nIf-Match: %s\r\n", mtime, cond->if_token);
+        /* the listing stores the ETag without its quotes (see above),
+         * If-Match needs the quoted entity tag (RFC 7232) */
+        snprintf(hdr, sizeof(hdr), "X-OC-Mtime: %ld\r\nIf-Match: \"%s\"\r\n", mtime, cond->if_token);
     else if (cond && cond->create_only)
         snprintf(hdr, sizeof(hdr), "X-OC-Mtime: %ld\r\nIf-None-Match: *\r\n", mtime);
     else

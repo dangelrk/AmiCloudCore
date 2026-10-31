@@ -1329,6 +1329,11 @@ out_free:
     snprintf(summary, sizeof(summary),
             "%d hochgeladen, %d heruntergeladen, %d unveraendert, %d geloescht, %d Konflikt(e)",
             out->uploaded, out->downloaded, out->unchanged, out->deleted, out->conflicts);
+    if (out->skipped) {
+        char skipsuf[40];
+        snprintf(skipsuf, sizeof(skipsuf), ", %d uebersprungen", out->skipped);
+        strncat(summary, skipsuf, sizeof(summary) - strlen(summary) - 1);
+    }
     if (out->errors) {
         char errsuf[32];
         snprintf(errsuf, sizeof(errsuf), ", %d Fehler", out->errors);
