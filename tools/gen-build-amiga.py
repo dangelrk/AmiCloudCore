@@ -85,6 +85,8 @@ def amiga_flags(flags, reldir):
     for f in flags:
         if f.startswith("+"):
             continue
+        if f.startswith("-DAC_BUILD_DATE="):
+            continue  # native build: version.h falls back to __DATE__
         if f.startswith("-I"):
             p = f[2:]
             if p in NATIVE_IMPLICIT:

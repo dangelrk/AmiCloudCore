@@ -18,10 +18,10 @@
 #   aminet.readme    Aminet readme for "make release"; @VERSION@ is replaced
 #
 # In the drawer's Install-*, Uninstall-* and ReadMe, dist-amiga replaces
-# @VERSION@ (e.g. 0.1), @DATE@ (dd.mm.yyyy), @VER_MAJOR@ (0) and
+# @VERSION@ (e.g. 0.1), @DATE@ (build date, dd.mm.yyyy), @VER_MAJOR@ (0) and
 # @VER_REVN@ (revision plus one, 2) -- the shell installers compare
-# installed programs against them with "Version ... FILE". Version and
-# date come from core/libcloudcore/include/cloudcore/version.h. With an
+# installed programs against them with "Version ... FILE". Version from
+# core/libcloudcore/include/cloudcore/version.h, date = build day. With an
 # Install-*.shell, the helper core/tools/amiga/Install-Datei is copied too.
 #
 # Every sub-Makefile stays usable on its own; this file only loops over
@@ -37,7 +37,10 @@ DIST_DIR   = $(BUILD_DIR)/dist/$(PROJECT)
 RELEASE_DIR = $(BUILD_DIR)/release
 VERSION_H  = core/libcloudcore/include/cloudcore/version.h
 VERSION   ?= $(shell sed -n 's/^\#define AC_VERSION *"\([^"]*\)".*/\1/p' $(VERSION_H))
-DATE      ?= $(shell sed -n 's/^\#define AC_DATE *"\([^"]*\)".*/\1/p' $(VERSION_H))
+# Build date = the day "make" runs (see version.h). Exported, so every
+# sub-make passes the same -DAC_BUILD_DATE; override with DATE=dd.mm.yyyy.
+DATE      ?= $(shell date +%d.%m.%Y)
+export AC_BUILD_DATE := $(DATE)
 VER_MAJOR  = $(word 1,$(subst ., ,$(VERSION)))
 VER_REVN   = $(shell expr $(word 2,$(subst ., ,$(VERSION))) + 1)
 PYTHON    ?= python3
@@ -51,7 +54,7 @@ VBCC      ?= /opt/vbcc
 export VBCC
 AMIGA_MAKEFLAGS = $(if $(VC_CONFIG),TARGET=+$(VC_CONFIG))
 
-.PHONY: all pc qt amiga build-amiga-script verify-amiga-script dist-amiga \
+.PHONY: all pc qt amiga amiga-clean build-amiga-script verify-amiga-script dist-amiga \
         release check-guide fsuae install clean help
 
 all: pc
@@ -85,6 +88,9 @@ amiga:
 	for d in $(AMIGA_DIRS); do \
 	    echo "==> $$d (amiga)"; \
 	    $(MAKE) -C $$d -f Makefile.amiga-cross $(AMIGA_MAKEFLAGS); done
+
+amiga-clean:
+	-for d in $(AMIGA_DIRS); do $(MAKE) -C $$d -f Makefile.amiga-cross clean; done
 
 build-amiga-script:
 	python3 core/tools/gen-build-amiga.py --name $(PROJECT)
@@ -127,8 +133,12 @@ dist-amiga: amiga
 # Release files as uploaded to Aminet/GitHub: the archive with version in
 # its name plus the Aminet readme (install/amiga/aminet.readme, Latin-1).
 # The archive is checked with lha (Lhasa) when it is installed.
-release: dist-amiga
+# Every Amiga program is rebuilt, so all of them carry today's date in
+# their $VER string -- the day the release is built and tagged.
+release:
 	@test -n "$(VERSION)" || { echo "VERSION unbekannt (AC_VERSION nicht gefunden)"; exit 1; }
+	$(MAKE) amiga-clean
+	$(MAKE) dist-amiga
 	@echo "Release $(PROJECT) $(VERSION) ($(DATE))"
 	mkdir -p $(RELEASE_DIR)
 	cp $(BUILD_DIR)/$(PROJECT).lha $(RELEASE_DIR)/$(PROJECT)-$(VERSION).lha

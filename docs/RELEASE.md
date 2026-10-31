@@ -2,20 +2,24 @@
 
 Gilt für alle drei Projekte, die diesen Core als Submodul `core/` benutzen.
 Erstes Release: **v0.1 vom 31.10.2026** (Tags in allen vier Repos,
-GitHub-Releases bei AmiCloud, AmiOwnCloud und AmiVCS).
+GitHub-Releases bei AmiCloud, AmiOwnCloud und AmiVCS). In Arbeit: **0.2**.
 
 ## 1. Version hochsetzen – Pflicht
 
-Version und Datum stehen **nur** in
-`libcloudcore/include/cloudcore/version.h`:
+Die Version steht **nur** in `libcloudcore/include/cloudcore/version.h`:
 
 ```c
 #define AC_VERSION "0.2"         /* version.revision, beides Zahlen */
-#define AC_DATE    "15.12.2026"  /* dd.mm.yyyy */
 ```
 
 - Daraus bauen alle Programme ihre `$VER`-Angabe (auch die Handler), und
   `make release` benennt die Archive danach.
+- **Das Datum wird nicht gepflegt.** Es ist immer der Tag des Bauens: Die
+  Makefiles übergeben `-DAC_BUILD_DATE=TT.MM.JJJJ`, und `make release`
+  baut alle Amiga-Programme neu. Ein Release trägt also den Tag, an dem es
+  gebaut und getaggt wird. **Bauen und Taggen am selben Tag.** Ein
+  anderes Datum erzwingt `make release DATE=TT.MM.JJJJ`. Ohne make (das
+  native `Build-Amiga`) steht `__DATE__` im Format „Oct 31 2026“ drin.
 - **Ohne höhere Version gilt ein Update als „gleiche Version“.** Die Installer
   vergleichen installierte und neue Programme per `$VER`. Bei gleicher Version
   ersetzen sie nur stillschweigend, bei älterer Archivversion behalten sie
@@ -29,8 +33,8 @@ Version und Datum stehen **nur** in
     `AmiVCS/docs/INSTALL.md` und `AmiVCS-Handbuch.html` (`AmiVCS-0.1.lha`).
   - Versionszeilen in den Handbüchern: `AmiCloud.guide` und
     `AmiCloud-Handbuch.html` („Programme 0.1 (2026)“), `AmiVCS.guide`
-    („Programmversion 0.1“), `AmiOwnCloud.guide` (Tabelle mit Programm,
-    Version und Datum).
+    und `AmiVCS-Handbuch.html` („Programmversion 0.1“),
+    `AmiOwnCloud.guide` (Tabelle mit Programm, Version und Datum).
   - Die Server-API-Version von AmiVCS (`{"status":"ok","version":"0.1"}`)
     ist eine eigene Version und hat mit den Amiga-Programmen nichts zu tun.
 
