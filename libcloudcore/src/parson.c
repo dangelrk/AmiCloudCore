@@ -1008,7 +1008,16 @@ static int json_serialize_to_buffer_r(const JSON_Value *value, char *buf, int le
             if (buf != NULL) {
                 num_buf = buf;
             }
-            written = sprintf(num_buf, FLOAT_FORMAT, num);
+            /* AmiCloud: whole numbers in the long range are written as
+             * integers. vbcc's printf (m68k-amigaos vc.lib) prints some
+             * exact whole doubles wrongly with %1.17g, e.g. 986.0 as
+             * "985.999999999999" -- IDs and sizes would come back one
+             * smaller. See AC_DTOL() in amicloud.h. */
+            if (num >= -2147483647.0 && num <= 2147483647.0 && num == (double)(long)num) {
+                written = sprintf(num_buf, "%ld", (long)num);
+            } else {
+                written = sprintf(num_buf, FLOAT_FORMAT, num);
+            }
             if (written < 0) {
                 return -1;
             }

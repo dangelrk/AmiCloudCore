@@ -13,6 +13,9 @@ Fremdkomponente, die unter ihrer eigenen, GPL-kompatiblen Lizenz steht:
 - Lokale Änderung: In `parson.h` wurde die Ersatzdeklaration von `lldiv_t`
   entfernt (kollidierte mit der libc-Deklaration, Parson nutzt sie nicht).
   Details im Kommentar an dieser Stelle.
+- Lokale Änderung: In `parson.c` werden ganze Zahlen im `long`-Bereich mit
+  `%ld` statt `%1.17g` geschrieben. Das `printf` von vbcc für AmigaOS gibt
+  manche ganzen Zahlen mit `%1.17g` falsch aus (986 als `985.999999999999`).
 
 `THIRD-PARTY-NOTICES.txt` enthält denselben Hinweis samt vollem
 MIT-Text als reine Textdatei; `make dist-amiga` legt sie als
