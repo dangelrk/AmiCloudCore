@@ -36,6 +36,8 @@ typedef struct {
     /* remote names skipped because they are too long for the local file
      * system (S15) */
     int skipped;
+    /* files not transferred because the virus check found something */
+    int viruses;
 } SyncSummary;
 
 /* Options of one run. Initialise with sync_options_init() and change
@@ -54,6 +56,12 @@ typedef struct {
     /* Longest local file name in bytes; 0 = ask libcloudfs
      * (localfs_name_max(), S15). Longer remote names are skipped. */
     int name_max;
+    /* Virus check of every file before it is uploaded or put in place
+     * after a download (libcloudfs: xvs.library on AmigaOS, nothing
+     * elsewhere). virus_max: largest file checked, 0 = LOCALFS_VIRUS_MAX,
+     * < 0 = no check. virus_check: replaces localfs_virus_check (tests). */
+    long virus_max;
+    int (*virus_check)(const char *path, long max_bytes, char *name, size_t namesz);
 } SyncOptions;
 
 void sync_options_init(SyncOptions *o);

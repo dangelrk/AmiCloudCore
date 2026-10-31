@@ -73,6 +73,7 @@ typedef struct {
 
 static char g_tmproot[512];
 static int  g_name_max;   /* SyncOptions.name_max for the next runs, 0 = probe */
+static int (*g_virus)(const char *, long, char *, size_t);   /* SyncOptions.virus_check */
 static int  g_envno;
 
 static void rm_rf(const char *path)
@@ -200,6 +201,7 @@ static void run_root(Env *e, const char *remote_root, int dry)
         o.dry_run = dry;
         o.verbose = 1;
         o.name_max = g_name_max;
+        o.virus_check = g_virus;
         cloudsync_run_ex(&e->f.t, e->local, remote_root, &o, &pr, &e->s);
     }
     fflush(stdout);
@@ -1586,6 +1588,46 @@ static void t_cs_identity(void)
     env_free(&e);
 }
 
+/* ===== Virus check (xvs.library on the Amiga; a stub here) ===== */
+static int fake_virus(const char *path, long max, char *name, size_t nsz)
+{
+    char buf[256];
+    size_t n;
+    FILE *fp = fopen(path, "rb");
+    (void)max;
+    if (!fp) return -1;
+    n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[n] = '\0';
+    if (!strstr(buf, "EICAR-VIRUS")) return 0;
+    snprintf(name, nsz, "Test-Virus");
+    return 1;
+}
+
+static void t_virus(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    g_virus = fake_virus;
+    fake_put_data(&e.f, rp(&e, "sauber.txt"), "clean", T0);
+    fake_put_data(&e.f, rp(&e, "boese.exe"), "xx EICAR-VIRUS xx", T0);
+    lw(&e, "lokal-boese.exe", "EICAR-VIRUS", T0);
+    lw(&e, "lokal-sauber.txt", "ok", T0);
+    run(&e);
+    CHECK_EQ(e.s.viruses, 2);
+    CHECK(lhas(&e, "sauber.txt", "clean"));
+    CHECK(!lexists(&e, "boese.exe"));
+    CHECK(!lexists(&e, SYNC_PART_FILE));
+    CHECK(fake_find(&e.f, rp(&e, "lokal-boese.exe")) == NULL);
+    CHECK(fake_has(&e.f, rp(&e, "lokal-sauber.txt"), "ok"));
+    CHECK(lhas(&e, "lokal-boese.exe", "EICAR-VIRUS"));        /* never deleted locally */
+    CHECK(fake_has(&e.f, rp(&e, "boese.exe"), "xx EICAR-VIRUS xx"));   /* nor remotely */
+    run(&e);                                                  /* stays like that */
+    CHECK_EQ(e.s.viruses, 2);
+    CHECK_EQ(e.s.deleted, 0);
+    g_virus = NULL;
+    env_free(&e);
+}
+
 /* ------------------------------------------------------------------ */
 typedef struct { const char *name; void (*fn)(void); const char *risk; } Test;
 
@@ -1652,6 +1694,7 @@ static const Test tests[] = {
     { "Zeichensatz: gleiche lokale Form",            t_cs_clash, NULL },
     { "Zeichensatz: NFD-Name vom Mac",               t_cs_nfd_name, NULL },
     { "Zeichensatz: Wechsel = neuer Stand",          t_cs_identity, NULL },
+    { "Virenpruefung: nicht hoch-, nicht heruntergeladen", t_virus, NULL },
     { "kaputter Stand (AmiCloud)",                   t_corrupt_baseline_ac, NULL },
     { "AmiCloud: Ordner-Loeschen behaelt neue Datei", t_ac_dir_delete_keeps_new_file, NULL },
     { "S2: Abbruch mitten im Lauf",                  t_break_mid_run, NULL },

@@ -672,6 +672,24 @@ static void queue_mkdir_remote(SyncActions *acts, const char *relpath, const cha
     if (act) strncpy(act->rpath, rpath, sizeof(act->rpath) - 1);
 }
 
+/* Virus check of a file before it is uploaded or put in place (see
+ * SyncOptions). Reports and counts a hit as an error. */
+static int virus_found(const SyncOptions *o, const char *path, const char *shown,
+                       SyncSummary *out)
+{
+    char name[128];
+    int r;
+    if (o->virus_max < 0) return 0;
+    r = (o->virus_check ? o->virus_check : localfs_virus_check)(path, o->virus_max,
+                                                                 name, sizeof(name));
+    if (r != 1) return 0;
+    ui_notify(UI_ERROR, "VIRUS in %s: %s -- nicht uebertragen", shown, name[0] ? name : "?");
+    ac_log_printf("sync: Virus %s in %s -- nicht uebertragen\n", name, shown);
+    out->errors++;
+    out->viruses++;
+    return 1;
+}
+
 /* S7: 1 if the local file is still exactly what the scan saw (or still
  * absent) -- checked right before it is replaced or deleted. */
 static int local_as_scanned(const SyncAction *act)
@@ -1446,6 +1464,10 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 SyncPutResult res;
                 int rc;
                 progress_prefix(pr, act->size);
+                if (virus_found(opts, act->lpath, act->lpath, out)) {
+                    act->failed = 1;   /* never uploaded */
+                    break;
+                }
                 cond.if_revision = act->if_revision;
                 cond.if_id       = act->if_id;
                 cond.if_token    = act->if_token;
@@ -1492,6 +1514,11 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 progress_prefix(pr, act->size);
                 localfs_sibling(part, sizeof(part), act->lpath, SYNC_PART_FILE);
                 got = (t->get(t, act->rpath, part, act->lpath) == 0);
+                if (got && virus_found(opts, part, act->lpath, out)) {
+                    remove(part);   /* never put in place */
+                    act->failed = 1;
+                    break;
+                }
                 if (got && !local_as_scanned(act)) {
                     /* S7: edited while we were busy -- keep the edit, the
                      * next run compares again */
@@ -1692,6 +1719,11 @@ out_free:
     snprintf(summary, sizeof(summary),
             "%d hochgeladen, %d heruntergeladen, %d unveraendert, %d geloescht, %d Konflikt(e)",
             out->uploaded, out->downloaded, out->unchanged, out->deleted, out->conflicts);
+    if (out->viruses) {
+        char virsuf[40];
+        snprintf(virsuf, sizeof(virsuf), ", %d VIRUS", out->viruses);
+        strncat(summary, virsuf, sizeof(summary) - strlen(summary) - 1);
+    }
     if (out->skipped) {
         char skipsuf[40];
         snprintf(skipsuf, sizeof(skipsuf), ", %d uebersprungen", out->skipped);

@@ -171,3 +171,96 @@ int localfs_mkdir_p(const char *path)
     }
     return localfs_mkdir(buf);
 }
+
+/* ------------------------------------------------------------------ */
+/* Virus check through xvs.library (AmigaOS)                            */
+/* ------------------------------------------------------------------ */
+#ifdef PLATFORM_AMIGA
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <exec/libraries.h>
+#include <proto/exec.h>
+
+/* first fields of xvs.library's struct xvsFileInfo (libraries/xvs.h) */
+struct lf_xvsFileInfo {
+    APTR   File;
+    ULONG  FileLen;
+    STRPTR Name;
+    UBYTE  FileType;
+    UBYTE  ModifiedFlag;
+};
+#define LF_XVSOBJ_FILEINFO 3
+#define LF_XVSFT_DATAVIRUS 4
+#define LF_XVSFT_LINKVIRUS 6
+
+/* jump table, xvs_lib.fd (bias 30) */
+APTR  __lfxvsAllocObject(__reg("a6") struct Library *, __reg("d0") ULONG type) = "\tjsr\t-48(a6)";
+void  __lfxvsFreeObject(__reg("a6") struct Library *, __reg("a1") APTR obj) = "\tjsr\t-54(a6)";
+ULONG __lfxvsCheckFile(__reg("a6") struct Library *, __reg("a0") APTR info) = "\tjsr\t-96(a6)";
+
+static struct Library *g_xvs;
+static int g_xvs_tried;
+
+static struct Library *xvs_base(void)
+{
+    if (!g_xvs_tried) {
+        g_xvs_tried = 1;
+        g_xvs = OpenLibrary((STRPTR)"xvs.library", 33);   /* closed by the OS at exit */
+    }
+    return g_xvs;
+}
+
+int localfs_virus_available(void) { return xvs_base() != NULL; }
+
+int localfs_virus_check(const char *path, long max_bytes, char *name_out, size_t namesz)
+{
+    struct Library *xb = xvs_base();
+    struct lf_xvsFileInfo *fi;
+    FILE *fp;
+    long size;
+    UBYTE *buf;
+    int infected = 0;
+
+    if (name_out && namesz) name_out[0] = '\0';
+    if (!xb) return 0;
+    if (max_bytes <= 0) max_bytes = LOCALFS_VIRUS_MAX;
+    fp = fopen(path, "rb");
+    if (!fp) return -1;
+    fseek(fp, 0, SEEK_END);
+    size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (size <= 0 || size > max_bytes) { fclose(fp); return 0; }
+    buf = (UBYTE *)AllocVec((ULONG)size, MEMF_ANY);
+    if (!buf) { fclose(fp); return 0; }   /* no memory: unchecked, not an error */
+    if (fread(buf, 1, (size_t)size, fp) != (size_t)size) { fclose(fp); FreeVec(buf); return -1; }
+    fclose(fp);
+
+    fi = (struct lf_xvsFileInfo *)__lfxvsAllocObject(xb, LF_XVSOBJ_FILEINFO);
+    if (fi) {
+        ULONG type;
+        fi->File = buf;
+        fi->FileLen = (ULONG)size;
+        type = __lfxvsCheckFile(xb, fi);
+        if (type >= LF_XVSFT_DATAVIRUS && type <= LF_XVSFT_LINKVIRUS) {
+            infected = 1;
+            if (name_out && namesz) {
+                strncpy(name_out, fi->Name ? (const char *)fi->Name : "?", namesz - 1);
+                name_out[namesz - 1] = '\0';
+            }
+        }
+        __lfxvsFreeObject(xb, fi);
+    }
+    FreeVec(buf);
+    return infected;
+}
+#else
+int localfs_virus_available(void) { return 0; }
+
+int localfs_virus_check(const char *path, long max_bytes, char *name_out, size_t namesz)
+{
+    (void)path; (void)max_bytes;
+    if (name_out && namesz) name_out[0] = '\0';
+    return 0;
+}
+#endif
+

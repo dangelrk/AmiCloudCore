@@ -89,6 +89,18 @@ int localfs_replace(const char *src, const char *dst);
  * on AmigaOS (classic FFS truncates silently to 30), 255 elsewhere. */
 int localfs_name_max(const char *dir);
 
+/* Virus check of a local file (optional). AmigaOS: xvs.library 33+ (if
+ * installed) checks the whole file in memory for link, file and data
+ * viruses (VirusZ's engine). Elsewhere, without the library, or for a
+ * file larger than max_bytes (<= 0: LOCALFS_VIRUS_MAX) nothing is
+ * checked. Returns 1 if infected (virus name in name_out, if given), 0
+ * if clean or not checked, -1 if the file cannot be read. */
+#define LOCALFS_VIRUS_MAX (2L * 1024 * 1024)
+int localfs_virus_check(const char *path, long max_bytes, char *name_out, size_t namesz);
+
+/* 1 if localfs_virus_check() really checks (AmigaOS with xvs.library). */
+int localfs_virus_available(void);
+
 /* 1 if names in dir are case-sensitive (probe file, see localfs_util.c),
  * 0 if not or if the probe fails. */
 int localfs_case_sensitive(const char *dir);

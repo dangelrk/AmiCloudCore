@@ -295,9 +295,35 @@ void panel_copy_file(PanelSource ssrc, const AcConfig *scfg, const char *spath,
     progress_prefix(&c->pr, smeta->size);
     if (!ui_progress(0, smeta->size, name)) { c->cancelled = 1; return; }
     if (ssrc == PANEL_LOCAL && dsrc == PANEL_CLOUD) {
-        if (cmd_put(dcfg, spath, dpath) == 0) c->pr.ok++; else c->pr.err++;
+        char virus[128];
+        if (localfs_virus_check(spath, 0, virus, sizeof(virus)) == 1) {
+            ui_notify(UI_ERROR, "VIRUS in %s: %s -- nicht hochgeladen", spath, virus);
+            c->pr.err++;
+        } else if (cmd_put(dcfg, spath, dpath) == 0) c->pr.ok++;
+        else c->pr.err++;
     } else if (ssrc == PANEL_CLOUD && dsrc == PANEL_LOCAL) {
-        if (cmd_get(scfg, spath, dpath) == 0) c->pr.ok++; else c->pr.err++;
+        if (!localfs_virus_available()) {
+            if (cmd_get(scfg, spath, dpath) == 0) c->pr.ok++; else c->pr.err++;
+        } else {
+            /* with a virus checker: into a temporary file next to the
+             * target, checked, and only then put in place -- an infected
+             * download never replaces an existing file */
+            char part[AC_MAX_PATH], virus[128];
+            localfs_sibling(part, sizeof(part), dpath, ".amicloud.part");
+            if (cmd_get(scfg, spath, part) != 0) {
+                remove(part);
+                c->pr.err++;
+            } else if (localfs_virus_check(part, 0, virus, sizeof(virus)) == 1) {
+                remove(part);
+                ui_notify(UI_ERROR, "VIRUS in %s: %s -- nicht uebernommen", dpath, virus);
+                c->pr.err++;
+            } else if (!localfs_replace(part, dpath)) {
+                remove(part);
+                c->pr.err++;
+            } else {
+                c->pr.ok++;
+            }
+        }
     } else {
         /* Local<->Local, Cloud<->Cloud: no case for that exists yet
          * (do_copy()/doCopy() already reject Cloud->Cloud and don't offer
