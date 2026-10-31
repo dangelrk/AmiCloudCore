@@ -1,0 +1,1024 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (C) 2026 Ronny Krueger
+ *
+ * test_sync.c -- host unit tests for the sync kernel (cloudsync_run_t)
+ * against an in-memory FakeTransport (fake_transport.h) and a real
+ * temporary local directory.
+ *
+ * Two kinds of tests:
+ *
+ *   ok     pins the current, intended behaviour.
+ *   RISK   asserts the SAFE behaviour for one of the data risks listed in
+ *          AmiCloud docs/design/desktop-sync-plan.md (section 2.1 and
+ *          S1-S13). Today the kernel fails these, so they are expected to
+ *          fail ("XFAIL") and prove that the risk is real. Once a fix
+ *          lands, the test reports XPASS, which counts as a failure until
+ *          its RISK mark is removed -- so a fix can't go unnoticed and a
+ *          regression can't sneak back in.
+ *
+ * Run: make -C libcloudsync/tests  (or "make test" in the core root).
+ * VERBOSE=1 in the environment prints the kernel's ui_notify() lines.
+ */
+#include "sync.h"
+#include "syncstate.h"
+#include "localfs.h"
+#include "ui_hooks.h"
+#include "progress.h"
+#include "fake_transport.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <utime.h>
+#include <fcntl.h>
+
+/* ------------------------------------------------------------------ */
+/* Mini test framework                                                 */
+/* ------------------------------------------------------------------ */
+static int g_failed;          /* checks failed in the current test */
+static int g_quiet_checks;    /* RISK tests: don't print each failed check */
+static int g_skipped;
+static int g_verbose;
+
+#define CHECK(cond) do { if (!(cond)) { g_failed++; \
+    if (!g_quiet_checks || g_verbose) printf("    %s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); } } while (0)
+#define CHECK_EQ(a, b) do { long _a = (long)(a), _b = (long)(b); if (_a != _b) { g_failed++; \
+    if (!g_quiet_checks || g_verbose) printf("    %s:%d: %s == %ld, erwartet %s == %ld\n", \
+        __FILE__, __LINE__, #a, _a, #b, _b); } } while (0)
+#define SKIP(why) do { printf("    (uebersprungen: %s)\n", why); g_skipped = 1; return; } while (0)
+
+static void quiet_notify(int level, const char *msg)
+{
+    if (g_verbose) printf("      [%d] %s\n", level, msg);
+}
+static int quiet_progress(long d, long t, const char *n) { (void)d; (void)t; (void)n; return 1; }
+
+/* ------------------------------------------------------------------ */
+/* Test environment: one local temp dir + one fake remote               */
+/* ------------------------------------------------------------------ */
+#define T0 1700000000L   /* fixed base time for mtimes */
+
+typedef struct {
+    char base[512];
+    char local[600];
+    const char *remote;
+    FakeTransport f;
+    SyncSummary s;
+} Env;
+
+static char g_tmproot[512];
+static int  g_envno;
+
+static void rm_rf(const char *path)
+{
+    char cmd[1200];
+    snprintf(cmd, sizeof(cmd), "chmod -R u+rwx '%s' 2>/dev/null; rm -rf '%s'", path, path);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
+static void env_init(Env *e, FakeKind kind)
+{
+    memset(e, 0, sizeof(*e));
+    snprintf(e->base, sizeof(e->base), "%s/t%03d", g_tmproot, ++g_envno);
+    snprintf(e->local, sizeof(e->local), "%s/local", e->base);
+    localfs_mkdir_p(e->local);
+    e->remote = "/r";
+    fake_init(&e->f, kind);
+}
+
+static void env_free(Env *e)
+{
+    fake_free(&e->f);
+    rm_rf(e->base);
+}
+
+static void lpath(Env *e, const char *rel, char *out, size_t sz)
+{
+    localfs_join(out, sz, e->local, rel);
+}
+
+static void set_mtime(const char *path, long mtime)
+{
+    struct utimbuf ut;
+    ut.actime = ut.modtime = (time_t)mtime;
+    utime(path, &ut);
+}
+
+/* writes a local file (parents created), sets its mtime */
+static void lw(Env *e, const char *rel, const char *content, long mtime)
+{
+    char p[1024], dir[1024];
+    FILE *fp;
+    char *slash;
+    lpath(e, rel, p, sizeof(p));
+    strcpy(dir, p);
+    slash = strrchr(dir, '/');
+    if (slash) { *slash = '\0'; localfs_mkdir_p(dir); }
+    fp = fopen(p, "wb");
+    if (!fp) { printf("    lw: %s nicht schreibbar\n", p); g_failed++; return; }
+    fputs(content, fp);
+    fclose(fp);
+    set_mtime(p, mtime);
+}
+
+static void lmkdir(Env *e, const char *rel)
+{
+    char p[1024];
+    lpath(e, rel, p, sizeof(p));
+    localfs_mkdir_p(p);
+}
+
+/* 1 if the local file exists with exactly this content */
+static int lhas(Env *e, const char *rel, const char *content)
+{
+    char p[1024], buf[4096];
+    FILE *fp;
+    size_t n;
+    lpath(e, rel, p, sizeof(p));
+    fp = fopen(p, "rb");
+    if (!fp) return 0;
+    n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[n] = '\0';
+    return strcmp(buf, content) == 0;
+}
+
+static int lexists(Env *e, const char *rel)
+{
+    char p[1024];
+    lpath(e, rel, p, sizeof(p));
+    return localfs_exists(p);
+}
+
+static long lmtime(Env *e, const char *rel)
+{
+    char p[1024];
+    long size = 0, mtime = 0;
+    lpath(e, rel, p, sizeof(p));
+    if (!localfs_stat(p, &size, &mtime)) return -1;
+    return mtime;
+}
+
+static void lrm(Env *e, const char *rel)
+{
+    char p[1024];
+    lpath(e, rel, p, sizeof(p));
+    rm_rf(p);
+}
+
+static char *rp(Env *e, const char *rel)
+{
+    static char buf[4][1024];
+    static int k;
+    k = (k + 1) & 3;
+    snprintf(buf[k], sizeof(buf[k]), "%s/%s", e->remote, rel);
+    return buf[k];
+}
+
+static void run_root(Env *e, const char *remote_root, int dry)
+{
+    Progress pr;
+    int saved = -1, devnull;
+    memset(&pr, 0, sizeof(pr));
+    fake_reset_calls(&e->f);
+    /* progress_prefix() prints straight to stdout -- hide it */
+    fflush(stdout);
+    if (!g_verbose && (devnull = open("/dev/null", O_WRONLY)) >= 0) {
+        saved = dup(1);
+        dup2(devnull, 1);
+        close(devnull);
+    }
+    cloudsync_run_t(&e->f.t, e->local, remote_root, dry, 1, &pr, &e->s);
+    fflush(stdout);
+    if (saved >= 0) { dup2(saved, 1); close(saved); }
+}
+
+static void run(Env *e)     { run_root(e, e->remote, 0); }
+static void run_dry(Env *e) { run_root(e, e->remote, 1); }
+
+/* a sync that has nothing to do at all */
+static void check_idle(Env *e)
+{
+    run(e);
+    CHECK_EQ(e->s.uploaded, 0);
+    CHECK_EQ(e->s.downloaded, 0);
+    CHECK_EQ(e->s.deleted, 0);
+    CHECK_EQ(e->s.conflicts, 0);
+    CHECK_EQ(e->s.errors, 0);
+}
+
+static int baseline_has(Env *e, const char *rel)
+{
+    SyncState st;
+    int found;
+    syncstate_load(e->local, &st);
+    found = syncstate_find(&st, rel) != NULL;
+    syncstate_free(&st);
+    return found;
+}
+
+/* ------------------------------------------------------------------ */
+/* Basic decision matrix (both backends where it matters)              */
+/* ------------------------------------------------------------------ */
+
+static void t_first_upload(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "a.txt", "alpha", T0);
+    lw(&e, "sub/b.txt", "beta", T0 + 10);
+    run(&e);
+    CHECK_EQ(e.s.uploaded, 2);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "alpha"));
+    CHECK(fake_has(&e.f, rp(&e, "sub/b.txt"), "beta"));
+    CHECK(fake_find(&e.f, rp(&e, "sub/b.txt"))->mtime == T0 + 10);
+    CHECK(baseline_has(&e, "sub/b.txt"));
+    check_idle(&e);
+    check_idle(&e);   /* WebDAV: the second run after upload fills the token */
+    env_free(&e);
+}
+static void t_first_upload_ac(void) { t_first_upload(FAKE_AMICLOUD); }
+static void t_first_upload_dav(void) { t_first_upload(FAKE_WEBDAV); }
+
+static void t_first_download(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "alpha", T0);
+    fake_put_data(&e.f, rp(&e, "d/e/c.txt"), "gamma", T0 + 20);
+    run(&e);
+    CHECK_EQ(e.s.downloaded, 2);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(lhas(&e, "a.txt", "alpha"));
+    CHECK(lhas(&e, "d/e/c.txt", "gamma"));
+    CHECK_EQ(lmtime(&e, "d/e/c.txt"), T0 + 20);
+    CHECK(!lexists(&e, SYNC_PART_FILE));
+    check_idle(&e);
+    env_free(&e);
+}
+static void t_first_download_ac(void) { t_first_download(FAKE_AMICLOUD); }
+static void t_first_download_dav(void) { t_first_download(FAKE_WEBDAV); }
+
+/* both sides already have the file, no baseline yet */
+static void t_no_baseline_same_content_ac(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "same", T0);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "same", T0 + 100);
+    run(&e);
+    CHECK_EQ(e.s.unchanged, 1);
+    CHECK_EQ(e.s.conflicts, 0);
+    CHECK_EQ(e.s.uploaded + e.s.downloaded, 0);
+    /* mtimes aligned to the older one */
+    CHECK_EQ(fake_find(&e.f, rp(&e, "a.txt"))->mtime, T0);
+    CHECK_EQ(lmtime(&e, "a.txt"), T0);
+    check_idle(&e);
+    env_free(&e);
+}
+
+/* Today: WebDAV has no content hash, so identical files without a
+ * baseline are a conflict (plan section 4 changes this to a .part
+ * download and a local compare). */
+static void t_no_baseline_same_content_dav(void)
+{
+    Env e; env_init(&e, FAKE_WEBDAV);
+    lw(&e, "a.txt", "same", T0);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "same", T0);
+    run(&e);
+    CHECK_EQ(e.s.conflicts, 1);
+    CHECK_EQ(e.s.uploaded + e.s.downloaded, 0);
+    run(&e);
+    CHECK_EQ(e.s.conflicts, 1);   /* stays a conflict */
+    env_free(&e);
+}
+
+static void t_no_baseline_different_content(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "a.txt", "local", T0);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "remote", T0);
+    run(&e);
+    CHECK_EQ(e.s.conflicts, 1);
+    CHECK_EQ(e.s.uploaded + e.s.downloaded, 0);
+    CHECK(lhas(&e, "a.txt", "local"));
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "remote"));
+    env_free(&e);
+}
+static void t_no_baseline_diff_ac(void) { t_no_baseline_different_content(FAKE_AMICLOUD); }
+static void t_no_baseline_diff_dav(void) { t_no_baseline_different_content(FAKE_WEBDAV); }
+
+static void t_local_change_uploads(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "a.txt", "v1", T0);
+    run(&e); run(&e);
+    lw(&e, "a.txt", "v2 local", T0 + 100);
+    run(&e);
+    CHECK_EQ(e.s.uploaded, 1);
+    CHECK_EQ(e.s.conflicts, 0);
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "v2 local"));
+    check_idle(&e);
+    check_idle(&e);
+    env_free(&e);
+}
+static void t_local_change_ac(void) { t_local_change_uploads(FAKE_AMICLOUD); }
+static void t_local_change_dav(void) { t_local_change_uploads(FAKE_WEBDAV); }
+
+static void t_remote_change_downloads(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "a.txt", "v1", T0);
+    run(&e); run(&e);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "v2 remote", T0 + 100);
+    run(&e);
+    CHECK_EQ(e.s.downloaded, 1);
+    CHECK_EQ(e.s.conflicts, 0);
+    CHECK(lhas(&e, "a.txt", "v2 remote"));
+    CHECK_EQ(lmtime(&e, "a.txt"), T0 + 100);
+    check_idle(&e);
+    env_free(&e);
+}
+static void t_remote_change_ac(void) { t_remote_change_downloads(FAKE_AMICLOUD); }
+static void t_remote_change_dav(void) { t_remote_change_downloads(FAKE_WEBDAV); }
+
+/* Today: changed differently on both sides = conflict, both sides kept
+ * unchanged, reported again on every run (plan section 4: keep both). */
+static void t_both_changed_conflict(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    SyncState st;
+    lw(&e, "a.txt", "v1", T0);
+    run(&e); run(&e);
+    lw(&e, "a.txt", "v2 local", T0 + 100);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "v2 remote", T0 + 200);
+    run(&e);
+    CHECK_EQ(e.s.conflicts, 1);
+    CHECK_EQ(e.s.uploaded + e.s.downloaded, 0);
+    CHECK(lhas(&e, "a.txt", "v2 local"));
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "v2 remote"));
+    syncstate_load(e.local, &st);
+    CHECK(st.had_conflicts);
+    syncstate_free(&st);
+    run(&e);
+    CHECK_EQ(e.s.conflicts, 1);
+    CHECK(lhas(&e, "a.txt", "v2 local"));
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "v2 remote"));
+    env_free(&e);
+}
+static void t_both_changed_ac(void) { t_both_changed_conflict(FAKE_AMICLOUD); }
+static void t_both_changed_dav(void) { t_both_changed_conflict(FAKE_WEBDAV); }
+
+/* AmiCloud only: both changed to the same content -> converge silently */
+static void t_both_changed_same_ac(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "v1", T0);
+    run(&e);
+    lw(&e, "a.txt", "v2", T0 + 100);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "v2", T0 + 100);
+    run(&e);
+    CHECK_EQ(e.s.conflicts, 0);
+    CHECK_EQ(e.s.unchanged, 1);
+    CHECK_EQ(e.s.uploaded + e.s.downloaded, 0);
+    check_idle(&e);
+    env_free(&e);
+}
+
+static void t_local_delete_propagates(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "a.txt", "alpha", T0);
+    lw(&e, "keep.txt", "keep", T0);
+    run(&e); run(&e);
+    lrm(&e, "a.txt");
+    run(&e);
+    CHECK_EQ(e.s.deleted, 1);
+    CHECK(fake_find(&e.f, rp(&e, "a.txt")) == NULL);
+    CHECK(fake_has(&e.f, rp(&e, "keep.txt"), "keep"));
+    CHECK(!baseline_has(&e, "a.txt"));
+    check_idle(&e);
+    env_free(&e);
+}
+static void t_local_delete_ac(void) { t_local_delete_propagates(FAKE_AMICLOUD); }
+static void t_local_delete_dav(void) { t_local_delete_propagates(FAKE_WEBDAV); }
+
+static void t_remote_delete_propagates(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "a.txt", "alpha", T0);
+    run(&e); run(&e);
+    fake_remove(&e.f, rp(&e, "a.txt"));
+    run(&e);
+    CHECK_EQ(e.s.deleted, 1);
+    CHECK(!lexists(&e, "a.txt"));
+    check_idle(&e);
+    env_free(&e);
+}
+static void t_remote_delete_ac(void) { t_remote_delete_propagates(FAKE_AMICLOUD); }
+static void t_remote_delete_dav(void) { t_remote_delete_propagates(FAKE_WEBDAV); }
+
+/* Today: deleted remotely but changed locally = conflict, local file
+ * kept, nothing uploaded (decision 2 of 31.10.2026: upload it again). */
+static void t_remote_del_local_change_ac(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "v1", T0);
+    run(&e);
+    fake_remove(&e.f, rp(&e, "a.txt"));
+    lw(&e, "a.txt", "v2 local", T0 + 100);
+    run(&e);
+    CHECK_EQ(e.s.conflicts, 1);
+    CHECK_EQ(e.s.uploaded, 0);
+    CHECK(lhas(&e, "a.txt", "v2 local"));
+    CHECK(fake_find(&e.f, rp(&e, "a.txt")) == NULL);
+    env_free(&e);
+}
+
+/* Today: deleted locally but changed remotely = conflict, remote kept,
+ * nothing downloaded (plan section 4: download it again). */
+static void t_local_del_remote_change_ac(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "v1", T0);
+    run(&e);
+    lrm(&e, "a.txt");
+    fake_put_data(&e.f, rp(&e, "a.txt"), "v2 remote", T0 + 100);
+    run(&e);
+    CHECK_EQ(e.s.conflicts, 1);
+    CHECK_EQ(e.s.downloaded, 0);
+    CHECK(!lexists(&e, "a.txt"));
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "v2 remote"));
+    env_free(&e);
+}
+
+/* Today: file vs. directory = conflict, both untouched */
+static void t_file_vs_dir_ac(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "x", "a file", T0);
+    fake_mkdir(&e.f, rp(&e, "x"), T0);
+    fake_put_data(&e.f, rp(&e, "x/in.txt"), "inside", T0);
+    run(&e);
+    CHECK(e.s.conflicts >= 1);
+    CHECK(lhas(&e, "x", "a file"));
+    CHECK(fake_has(&e.f, rp(&e, "x/in.txt"), "inside"));
+    env_free(&e);
+}
+
+static void t_dirs_created_both_ways(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lmkdir(&e, "emptylocal");
+    fake_mkdir(&e.f, rp(&e, "emptyremote"), T0);
+    run(&e);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(fake_find(&e.f, rp(&e, "emptylocal")) && fake_find(&e.f, rp(&e, "emptylocal"))->is_dir);
+    CHECK(localfs_is_dir(e.local) && lexists(&e, "emptyremote"));
+    check_idle(&e);
+    env_free(&e);
+}
+static void t_dirs_both_ac(void) { t_dirs_created_both_ways(FAKE_AMICLOUD); }
+static void t_dirs_both_dav(void) { t_dirs_created_both_ways(FAKE_WEBDAV); }
+
+/* a locally deleted tree is deleted remotely leaf-first */
+static void t_local_tree_delete(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "d/a.txt", "a", T0);
+    lw(&e, "d/e/b.txt", "b", T0);
+    run(&e); run(&e);
+    lrm(&e, "d");
+    run(&e);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK_EQ(e.s.deleted, 4);
+    CHECK(fake_find(&e.f, rp(&e, "d")) == NULL);
+    check_idle(&e);
+    env_free(&e);
+}
+static void t_tree_delete_ac(void) { t_local_tree_delete(FAKE_AMICLOUD); }
+static void t_tree_delete_dav(void) { t_local_tree_delete(FAKE_WEBDAV); }
+
+static void t_remote_tree_delete(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "d/a.txt", "a", T0);
+    lw(&e, "d/e/b.txt", "b", T0);
+    run(&e); run(&e);
+    fake_remove(&e.f, rp(&e, "d"));
+    run(&e);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK_EQ(e.s.deleted, 4);
+    CHECK(!lexists(&e, "d"));
+    env_free(&e);
+}
+static void t_rtree_delete_ac(void) { t_remote_tree_delete(FAKE_AMICLOUD); }
+static void t_rtree_delete_dav(void) { t_remote_tree_delete(FAKE_WEBDAV); }
+
+/* same content, different mtime after a sync: aligned, no transfer */
+static void t_mtime_align_ac(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    char p[1024];
+    lw(&e, "a.txt", "alpha", T0 + 500);
+    run(&e);
+    fake_find(&e.f, rp(&e, "a.txt"))->mtime = T0;  /* touch remotely, no content change */
+    e.f.global++;
+    run(&e);
+    CHECK_EQ(e.s.uploaded + e.s.downloaded, 0);
+    lpath(&e, "a.txt", p, sizeof(p));
+    CHECK_EQ(lmtime(&e, "a.txt"), T0);
+    env_free(&e);
+}
+
+static void t_dry_run_changes_nothing(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "alpha", T0);
+    fake_put_data(&e.f, rp(&e, "b.txt"), "beta", T0);
+    run_dry(&e);
+    CHECK_EQ(e.s.uploaded, 1);
+    CHECK_EQ(e.s.downloaded, 1);
+    CHECK(fake_find(&e.f, rp(&e, "a.txt")) == NULL);
+    CHECK(!lexists(&e, "b.txt"));
+    CHECK(!lexists(&e, SYNCSTATE_FILE));
+    CHECK_EQ(e.f.calls[FOP_PUT] + e.f.calls[FOP_GET] + e.f.calls[FOP_DEL] + e.f.calls[FOP_MKDIR], 0);
+    env_free(&e);
+}
+
+/* the kernel's own files are never synced */
+static void t_own_files_excluded(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "alpha", T0);
+    lw(&e, SYNC_PART_FILE, "half", T0);
+    lw(&e, "sub/" SYNC_PART_FILE, "half", T0);
+    run(&e);
+    CHECK(fake_find(&e.f, rp(&e, SYNCSTATE_FILE)) == NULL);
+    CHECK(fake_find(&e.f, rp(&e, SYNC_PART_FILE)) == NULL);
+    CHECK(fake_find(&e.f, rp(&e, "sub/" SYNC_PART_FILE)) == NULL);
+    CHECK_EQ(e.s.uploaded, 1);
+    env_free(&e);
+}
+
+/* a failed upload rolls its baseline entry back and is retried */
+static void t_failed_upload_retried(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "alpha", T0);
+    fake_fail(&e.f, FOP_PUT, rp(&e, "a.txt"));
+    run(&e);
+    CHECK_EQ(e.s.errors, 1);
+    CHECK(!baseline_has(&e, "a.txt"));
+    fake_fail(&e.f, FOP_PUT, NULL);
+    run(&e);
+    CHECK_EQ(e.s.uploaded, 1);
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "alpha"));
+    env_free(&e);
+}
+
+/* a failed download leaves the local file and no .part behind */
+static void t_failed_download_safe(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "v1", T0);
+    run(&e);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "v2 remote", T0 + 100);
+    fake_fail(&e.f, FOP_GET, rp(&e, "a.txt"));
+    run(&e);
+    CHECK_EQ(e.s.errors, 1);
+    CHECK(lhas(&e, "a.txt", "v1"));
+    CHECK(!lexists(&e, SYNC_PART_FILE));
+    env_free(&e);
+}
+
+/* AmiCloud: unchanged global_revision -> no remote listing at all */
+static void t_delta_shortcut_ac(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "alpha", T0);
+    lw(&e, "d/b.txt", "beta", T0);
+    run(&e);
+    run(&e);
+    CHECK_EQ(e.f.calls[FOP_LIST], 0);
+    lw(&e, "c.txt", "new local", T0);   /* a local change still uploads */
+    run(&e);
+    CHECK_EQ(e.f.calls[FOP_LIST], 0);
+    CHECK_EQ(e.s.uploaded, 1);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "remote change", T0 + 50);
+    run(&e);
+    CHECK(e.f.calls[FOP_LIST] > 0);
+    CHECK(lhas(&e, "a.txt", "remote change"));
+    env_free(&e);
+}
+
+/* an unresolved conflict disables the delta shortcut */
+static void t_conflict_disables_delta_ac(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "v1", T0);
+    run(&e);
+    lw(&e, "a.txt", "v2 local", T0 + 100);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "v2 remote", T0 + 100);
+    run(&e);
+    CHECK_EQ(e.s.conflicts, 1);
+    run(&e);
+    CHECK(e.f.calls[FOP_LIST] > 0);
+    CHECK_EQ(e.s.conflicts, 1);
+    env_free(&e);
+}
+
+/* WebDAV: a download stores the real local hash in the baseline, so the
+ * next run does not upload the same content back */
+static void t_dav_no_flipflop(void)
+{
+    Env e; env_init(&e, FAKE_WEBDAV);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "alpha", T0);
+    run(&e);
+    CHECK_EQ(e.s.downloaded, 1);
+    check_idle(&e);
+    lw(&e, "b.txt", "beta", T0);
+    run(&e);
+    CHECK_EQ(e.s.uploaded, 1);
+    check_idle(&e);
+    check_idle(&e);
+    CHECK_EQ(e.f.calls[FOP_PUT] + e.f.calls[FOP_GET], 0);
+    env_free(&e);
+}
+
+/* Today (S4 changes this): a missing local root is created and filled */
+static void t_missing_root_created(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "alpha", T0);
+    rm_rf(e.local);
+    run(&e);
+    CHECK(localfs_is_dir(e.local));
+    CHECK(lhas(&e, "a.txt", "alpha"));
+    env_free(&e);
+}
+
+static void t_syncstate_roundtrip(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    SyncState st, st2;
+    SyncStateEntry *x;
+    memset(&st, 0, sizeof(st));
+    st.global_revision = 4711;
+    st.had_conflicts = 1;
+    syncstate_upsert(&st, "a/b c/\xC3\xA4.txt", 0, 12, T0, "0123456789abcdef0123456789abcdef",
+                     "\"etag\"", 3, 99, T0 + 1);
+    syncstate_upsert(&st, "dir", 1, 0, T0, "", "", 1, 0, T0);
+    CHECK(syncstate_save(e.local, &st));
+    CHECK(syncstate_load(e.local, &st2));
+    CHECK_EQ(st2.n, 2);
+    CHECK_EQ(st2.global_revision, 4711);
+    CHECK_EQ(st2.had_conflicts, 1);
+    x = syncstate_find(&st2, "a/b c/\xC3\xA4.txt");
+    CHECK(x != NULL);
+    if (x) {
+        CHECK_EQ(x->size, 12);
+        CHECK_EQ(x->revision, 3);
+        CHECK_EQ(x->server_id, 99);
+        CHECK(strcmp(x->token, "\"etag\"") == 0);
+    }
+    syncstate_remove(&st2, "dir");
+    CHECK(syncstate_find(&st2, "dir") == NULL);
+    syncstate_free(&st);
+    syncstate_free(&st2);
+    env_free(&e);
+}
+
+/* a corrupt baseline counts as "no baseline" (AmiCloud: harmless, the
+ * hashes match again) */
+static void t_corrupt_baseline_ac(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "alpha", T0);
+    run(&e);
+    lw(&e, SYNCSTATE_FILE, "{ kaputt", T0);
+    run(&e);
+    CHECK_EQ(e.s.conflicts, 0);
+    CHECK_EQ(e.s.deleted, 0);
+    CHECK(lhas(&e, "a.txt", "alpha"));
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "alpha"));
+    env_free(&e);
+}
+
+/* ------------------------------------------------------------------ */
+/* RISK tests: safe behaviour that the kernel does NOT deliver today    */
+/* ------------------------------------------------------------------ */
+
+/* S1: a failing remote list() of a subdirectory makes that subtree look
+ * deleted remotely -> its local files are deleted. */
+static void r_list_error_deletes_local(void)
+{
+    Env e; env_init(&e, FAKE_WEBDAV);
+    lw(&e, "sub/f.txt", "precious", T0);
+    lw(&e, "top.txt", "top", T0);
+    run(&e); run(&e);
+    fake_fail(&e.f, FOP_LIST, rp(&e, "sub"));
+    run(&e);
+    CHECK(lhas(&e, "sub/f.txt", "precious"));
+    CHECK(e.s.errors > 0);
+    env_free(&e);
+}
+
+/* S1, AmiCloud: same once global_revision moved (any remote change) */
+static void r_list_error_deletes_local_ac(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "sub/f.txt", "precious", T0);
+    run(&e);
+    fake_put_data(&e.f, rp(&e, "other.txt"), "x", T0);
+    fake_fail(&e.f, FOP_LIST, rp(&e, "sub"));
+    run(&e);
+    CHECK(lhas(&e, "sub/f.txt", "precious"));
+    env_free(&e);
+}
+
+/* S1: an unreadable local directory makes its subtree look deleted
+ * locally -> deleted on the server. */
+static void r_opendir_error_deletes_remote(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    char p[1024];
+    if (geteuid() == 0) { env_free(&e); SKIP("laeuft als root"); }
+    lw(&e, "sub/f.txt", "precious", T0);
+    run(&e);
+    lpath(&e, "sub", p, sizeof(p));
+    chmod(p, 0);
+    run(&e);
+    chmod(p, 0755);
+    CHECK(fake_has(&e.f, rp(&e, "sub/f.txt"), "precious"));
+    env_free(&e);
+}
+
+/* S5: WebDAV DELETE of a locally deleted directory also removes a file
+ * that someone else added to it on the server meanwhile. */
+static void r_dav_dir_delete_takes_new_file(void)
+{
+    Env e; env_init(&e, FAKE_WEBDAV);
+    lw(&e, "d/a.txt", "a", T0);
+    run(&e); run(&e);
+    lrm(&e, "d");
+    fake_put_data(&e.f, rp(&e, "d/new.txt"), "added by someone else", T0 + 100);
+    run(&e);
+    CHECK(fake_has(&e.f, rp(&e, "d/new.txt"), "added by someone else") ||
+          lhas(&e, "d/new.txt", "added by someone else"));
+    env_free(&e);
+}
+
+/* same scenario on AmiCloud: the server refuses the non-empty delete,
+ * nothing is lost (pins today's behaviour, not a RISK test) */
+static void t_ac_dir_delete_keeps_new_file(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "d/a.txt", "a", T0);
+    run(&e);
+    lrm(&e, "d");
+    fake_put_data(&e.f, rp(&e, "d/new.txt"), "added by someone else", T0 + 100);
+    run(&e);
+    CHECK(fake_has(&e.f, rp(&e, "d/new.txt"), "added by someone else"));
+    env_free(&e);
+}
+
+/* S3: the baseline does not know which server/folder it belongs to.
+ * Pointing the same local folder at another (empty) remote folder makes
+ * every local file look "deleted remotely". */
+static void r_identity_change_deletes_local(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "precious", T0);
+    run(&e);
+    run_root(&e, "/other", 0);
+    CHECK(lhas(&e, "a.txt", "precious"));
+    env_free(&e);
+}
+
+/* S2: Ctrl-C / Abbrechen is never checked -- a pending break still runs
+ * every transfer. */
+static void r_break_ignored(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "alpha", T0);
+    lw(&e, "b.txt", "beta", T0);
+    ui_break_set();
+    run(&e);
+    ui_break_clear();
+    CHECK_EQ(e.f.calls[FOP_PUT], 0);
+    env_free(&e);
+}
+
+/* S6: two remote names differing only in case on a case-insensitive
+ * local file system: one overwrites the other locally, and the next run
+ * uploads the wrong content and deletes the other remote file. */
+static void r_case_collision(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    char p1[1024], p2[1024];
+    lw(&e, "CaseProbe", "x", T0);
+    lpath(&e, "caseprobe", p1, sizeof(p1));
+    lpath(&e, "CaseProbe", p2, sizeof(p2));
+    if (!localfs_exists(p1)) { env_free(&e); SKIP("Dateisystem unterscheidet Gross/Klein"); }
+    remove(p2);
+    fake_put_data(&e.f, rp(&e, "A.txt"), "upper", T0);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "lower", T0);
+    run(&e);
+    run(&e);
+    run(&e);
+    CHECK(fake_has(&e.f, rp(&e, "A.txt"), "upper"));
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "lower"));
+    env_free(&e);
+}
+
+/* S14: a failed download rolls back its baseline entry, but the run
+ * still stores the new global_revision. The next run takes the delta
+ * shortcut ("nothing changed remotely") and never retries; a later
+ * local edit then overwrites the newer server version. */
+static void r_failed_download_never_retried(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "v1", T0);
+    run(&e);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "v2 remote", T0 + 100);
+    fake_fail(&e.f, FOP_GET, rp(&e, "a.txt"));
+    run(&e);
+    fake_fail(&e.f, FOP_GET, NULL);
+    run(&e);
+    CHECK(lhas(&e, "a.txt", "v2 remote"));
+    lw(&e, "a.txt", "v3 local", T0 + 200);
+    run(&e);
+    CHECK(e.s.conflicts > 0 || lhas(&e, "a.txt", "v2 remote"));
+    CHECK(!fake_has(&e.f, rp(&e, "a.txt"), "v3 local") || e.s.conflicts > 0);
+    env_free(&e);
+}
+
+/* hook helpers for the race tests: fire once on the first op of a kind */
+typedef struct { FakeOp op; int fired; Env *e; const char *rel; const char *content; int local; } Race;
+
+static void race_hook(FakeTransport *f, FakeOp op, const char *path, void *ud)
+{
+    Race *r = (Race *)ud;
+    (void)f; (void)path;
+    if (r->fired || op != r->op) return;
+    r->fired = 1;
+    if (r->local) lw(r->e, r->rel, r->content, T0 + 999);
+    else fake_put_data(&r->e->f, rp(r->e, r->rel), r->content, T0 + 999);
+}
+
+/* S9: global_revision is read at the END of a run. A change by another
+ * client during the run is then covered by the stored counter, and the
+ * delta shortcut never sees it. */
+static void r_global_rev_at_end(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    Race r;
+    lw(&e, "a.txt", "v1", T0);
+    run(&e);
+    lw(&e, "b.txt", "local new", T0);
+    memset(&r, 0, sizeof(r));
+    r.op = FOP_PUT; r.e = &e; r.rel = "a.txt"; r.content = "changed by other client"; r.local = 0;
+    e.f.hook = race_hook; e.f.hook_ud = &r;
+    run(&e);
+    e.f.hook = NULL;
+    run(&e);
+    CHECK(lhas(&e, "a.txt", "changed by other client"));
+    env_free(&e);
+}
+
+/* S7: the local file is edited after the scan, before the download
+ * replaces it -> the edit is overwritten. */
+static void r_download_overwrites_fresh_edit(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    Race r;
+    lw(&e, "a.txt", "v1", T0);
+    run(&e);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "v2 remote", T0 + 100);
+    memset(&r, 0, sizeof(r));
+    r.op = FOP_GET; r.e = &e; r.rel = "a.txt"; r.content = "fresh local edit"; r.local = 1;
+    e.f.hook = race_hook; e.f.hook_ud = &r;
+    run(&e);
+    e.f.hook = NULL;
+    run(&e);
+    CHECK(lhas(&e, "a.txt", "fresh local edit") ||
+          fake_has(&e.f, rp(&e, "a.txt"), "fresh local edit"));
+    env_free(&e);
+}
+
+/* S8: the upload has no revision condition -> a remote change made after
+ * the scan is overwritten. */
+static void r_upload_overwrites_remote_change(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    Race r;
+    lw(&e, "a.txt", "v1", T0);
+    run(&e);
+    lw(&e, "a.txt", "v2 local", T0 + 100);
+    memset(&r, 0, sizeof(r));
+    r.op = FOP_PUT; r.e = &e; r.rel = "a.txt"; r.content = "v2 other client"; r.local = 0;
+    e.f.hook = race_hook; e.f.hook_ud = &r;
+    run(&e);
+    e.f.hook = NULL;
+    CHECK(fake_has(&e.f, rp(&e, "a.txt"), "v2 other client") ||
+          lhas(&e, "a.txt", "v2 other client"));
+    env_free(&e);
+}
+
+/* ------------------------------------------------------------------ */
+typedef struct { const char *name; void (*fn)(void); const char *risk; } Test;
+
+static const Test tests[] = {
+    { "erster Abgleich laedt hoch (AmiCloud)",       t_first_upload_ac, NULL },
+    { "erster Abgleich laedt hoch (WebDAV)",         t_first_upload_dav, NULL },
+    { "erster Abgleich laedt herunter (AmiCloud)",   t_first_download_ac, NULL },
+    { "erster Abgleich laedt herunter (WebDAV)",     t_first_download_dav, NULL },
+    { "ohne Stand, gleicher Inhalt (AmiCloud)",      t_no_baseline_same_content_ac, NULL },
+    { "ohne Stand, gleicher Inhalt (WebDAV): Konflikt", t_no_baseline_same_content_dav, NULL },
+    { "ohne Stand, verschieden (AmiCloud)",          t_no_baseline_diff_ac, NULL },
+    { "ohne Stand, verschieden (WebDAV)",            t_no_baseline_diff_dav, NULL },
+    { "lokal geaendert -> hoch (AmiCloud)",          t_local_change_ac, NULL },
+    { "lokal geaendert -> hoch (WebDAV)",            t_local_change_dav, NULL },
+    { "entfernt geaendert -> runter (AmiCloud)",     t_remote_change_ac, NULL },
+    { "entfernt geaendert -> runter (WebDAV)",       t_remote_change_dav, NULL },
+    { "beidseitig geaendert: Konflikt (AmiCloud)",   t_both_changed_ac, NULL },
+    { "beidseitig geaendert: Konflikt (WebDAV)",     t_both_changed_dav, NULL },
+    { "beidseitig gleich geaendert (AmiCloud)",      t_both_changed_same_ac, NULL },
+    { "lokal geloescht (AmiCloud)",                  t_local_delete_ac, NULL },
+    { "lokal geloescht (WebDAV)",                    t_local_delete_dav, NULL },
+    { "entfernt geloescht (AmiCloud)",               t_remote_delete_ac, NULL },
+    { "entfernt geloescht (WebDAV)",                 t_remote_delete_dav, NULL },
+    { "entfernt geloescht + lokal geaendert: Konflikt", t_remote_del_local_change_ac, NULL },
+    { "lokal geloescht + entfernt geaendert: Konflikt", t_local_del_remote_change_ac, NULL },
+    { "Datei gegen Verzeichnis: Konflikt",           t_file_vs_dir_ac, NULL },
+    { "leere Ordner beidseitig (AmiCloud)",          t_dirs_both_ac, NULL },
+    { "leere Ordner beidseitig (WebDAV)",            t_dirs_both_dav, NULL },
+    { "lokaler Baum geloescht (AmiCloud)",           t_tree_delete_ac, NULL },
+    { "lokaler Baum geloescht (WebDAV)",             t_tree_delete_dav, NULL },
+    { "entfernter Baum geloescht (AmiCloud)",        t_rtree_delete_ac, NULL },
+    { "entfernter Baum geloescht (WebDAV)",          t_rtree_delete_dav, NULL },
+    { "Zeitstempel angeglichen",                     t_mtime_align_ac, NULL },
+    { "Probelauf aendert nichts",                    t_dry_run_changes_nothing, NULL },
+    { "eigene Dateien ausgeschlossen",               t_own_files_excluded, NULL },
+    { "Upload-Fehler: Stand zurueck, neuer Versuch", t_failed_upload_retried, NULL },
+    { "Download-Fehler: lokal unberuehrt",           t_failed_download_safe, NULL },
+    { "global_revision-Abkuerzung",                  t_delta_shortcut_ac, NULL },
+    { "Konflikt schaltet Abkuerzung ab",             t_conflict_disables_delta_ac, NULL },
+    { "WebDAV: kein Hin und Her",                    t_dav_no_flipflop, NULL },
+    { "fehlende Wurzel wird angelegt (heute)",       t_missing_root_created, NULL },
+    { "Stand speichern/laden",                       t_syncstate_roundtrip, NULL },
+    { "kaputter Stand (AmiCloud)",                   t_corrupt_baseline_ac, NULL },
+    { "AmiCloud: Ordner-Loeschen behaelt neue Datei", t_ac_dir_delete_keeps_new_file, NULL },
+
+    { "list-Fehler loescht lokalen Teilbaum (WebDAV)",   r_list_error_deletes_local,     "S1" },
+    { "list-Fehler loescht lokalen Teilbaum (AmiCloud)", r_list_error_deletes_local_ac,  "S1" },
+    { "unlesbarer lokaler Ordner loescht auf Server",    r_opendir_error_deletes_remote, "S1" },
+    { "WebDAV-Ordner-Loeschen nimmt neue Datei mit",     r_dav_dir_delete_takes_new_file, "S5" },
+    { "anderer Server-Ordner loescht lokale Dateien",    r_identity_change_deletes_local, "S3" },
+    { "Abbruch wird ignoriert",                          r_break_ignored,                "S2" },
+    { "Gross/Klein-Kollision",                           r_case_collision,               "S6" },
+    { "global_revision erst am Laufende gelesen",        r_global_rev_at_end,            "S9" },
+    { "fehlgeschlagener Download nie wiederholt",       r_failed_download_never_retried, "S14" },
+    { "Download ueberschreibt frische Aenderung",        r_download_overwrites_fresh_edit, "S7" },
+    { "Upload ueberschreibt fremde Aenderung",           r_upload_overwrites_remote_change, "S8" },
+};
+
+int main(int argc, char **argv)
+{
+    UiHooks hooks;
+    const char *tmp = getenv("TMPDIR");
+    int i, n = (int)(sizeof(tests) / sizeof(tests[0]));
+    int pass = 0, fail = 0, xfail = 0, xpass = 0, skip = 0;
+
+    g_verbose = getenv("VERBOSE") && getenv("VERBOSE")[0] == '1';
+    memset(&hooks, 0, sizeof(hooks));
+    hooks.notify = quiet_notify;
+    hooks.progress = quiet_progress;
+    ui_set_hooks(&hooks);
+
+    snprintf(g_tmproot, sizeof(g_tmproot), "%s/acsynctest-XXXXXX", tmp && tmp[0] ? tmp : "/tmp");
+    if (!mkdtemp(g_tmproot)) { perror("mkdtemp"); return 2; }
+
+    for (i = 0; i < n; i++) {
+        if (argc > 1 && !strstr(tests[i].name, argv[1])) continue;
+        g_failed = 0; g_skipped = 0;
+        g_quiet_checks = tests[i].risk != NULL;
+        printf("%-6s %s%s%s\n", tests[i].risk ? "RISK" : "ok?", tests[i].name,
+               tests[i].risk ? "  " : "", tests[i].risk ? tests[i].risk : "");
+        tests[i].fn();
+        if (g_skipped) { skip++; printf("  -> SKIP\n"); }
+        else if (!tests[i].risk) {
+            if (g_failed) { fail++; printf("  -> FEHLER\n"); }
+            else { pass++; printf("  -> ok\n"); }
+        } else {
+            if (g_failed) { xfail++; printf("  -> XFAIL (Risiko besteht)\n"); }
+            else { xpass++; printf("  -> XPASS: behoben? RISK-Markierung entfernen\n"); }
+        }
+    }
+    rm_rf(g_tmproot);
+    printf("\n%d ok, %d Fehler, %d XFAIL (bekannte Risiken), %d XPASS, %d uebersprungen\n",
+           pass, fail, xfail, xpass, skip);
+    return (fail || xpass) ? 1 : 0;
+}
