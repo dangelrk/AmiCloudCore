@@ -482,63 +482,85 @@ int cmd_status(const AcConfig *cfg, char *version_out, size_t version_sz, long *
 /* directory: one call returns every changed path for this user,         */
 /* tombstones included.                                                   */
 /* ------------------------------------------------------------------ */
-int cmd_changes(const AcConfig *cfg, long since, AcChange **out, int *out_n, long *global_revision_out)
+int cmd_changes(const AcConfig *cfg, const char *prefix, long since, int limit,
+                AcChange **out, int *out_n, long *next_out, int *has_more_out)
 {
-    char auth[192], url[AC_MAX_URL];
+    char auth[192], url[AC_MAX_URL], rpath[AC_MAX_PATH];
+    size_t ul;
     HttpResponse *resp;
     JSON_Value *root_val;
     JSON_Object *root;
     JSON_Array *entries;
-    int n, i;
+    int n, i, w;
+    size_t strsz = 0;
     AcChange *arr;
+    char *strs;
 
     *out = NULL; *out_n = 0;
-    if (global_revision_out) *global_revision_out = 0;
+    *next_out = since; *has_more_out = 0;
 
     make_auth(auth, sizeof(auth), cfg);
-    snprintf(url, sizeof(url), "%s/api.php?action=changes&since=%ld", cfg->server, since);
+    full_path(rpath, sizeof(rpath), cfg, prefix && *prefix ? prefix : "/");
+    build_url(url, sizeof(url), cfg, "changes", rpath);
+    ul = strlen(url);
+    snprintf(url + ul, sizeof(url) - ul, "&since=%ld&limit=%d", since, limit);
 
     resp = http_request("GET", url, auth, NULL, 0, cfg->verify_ssl);
     g_last_status = resp ? resp->status_code : 0;
+    if (resp && resp->status_code == 410) { http_response_free(resp); return AC_CHANGES_TOO_OLD; }
     if (!resp || resp->status_code == 0 || !resp->body) {
         ui_notify(UI_ERROR, "amicloudcore: network error");
-        http_response_free(resp); return 0;
+        http_response_free(resp); return AC_CHANGES_ERROR;
     }
     root_val = json_parse_string(resp->body);
     http_response_free(resp);
-    if (!root_val) { ui_notify(UI_ERROR, "amicloudcore: invalid JSON"); return 0; }
+    if (!root_val) { ui_notify(UI_ERROR, "amicloudcore: invalid JSON"); return AC_CHANGES_ERROR; }
     root = json_value_get_object(root_val);
-    if (!root || !check_status(root, url)) { json_value_free(root_val); return 0; }
-
-    if (global_revision_out) *global_revision_out = jlong(root, "global_revision");
+    if (!root || !check_status(root, url)) { json_value_free(root_val); return AC_CHANGES_ERROR; }
+    /* a server without paging would hand out everything as one page and
+     * no "next" -- not supported (the client needs the new server) */
+    if (!json_object_has_value(root, "next")) {
+        ui_notify(UI_ERROR, "amicloudcore: Server zu alt fuer den schrittweisen Abgleich");
+        json_value_free(root_val); return AC_CHANGES_ERROR;
+    }
+    *next_out = jlong(root, "next");
+    *has_more_out = json_object_get_boolean(root, "has_more") == 1;
 
     entries = json_object_get_array(root, "entries");
-    if (!entries) { json_value_free(root_val); return 1; } /* no changes -- still success */
-
-    n = (int)json_array_get_count(entries);
-    if (n == 0) { json_value_free(root_val); return 1; }
-
-    arr = (AcChange *)calloc((size_t)n, sizeof(AcChange));
-    if (!arr) { json_value_free(root_val); return 0; }
+    n = entries ? (int)json_array_get_count(entries) : 0;
+    if (n == 0) { json_value_free(root_val); return AC_CHANGES_OK; }
 
     for (i = 0; i < n; i++) {
+        const char *path = json_object_get_string(json_array_get_object(entries, i), "path");
+        if (path) strsz += strlen(path) + 1;
+    }
+    arr = (AcChange *)calloc(1, sizeof(AcChange) * (size_t)n + strsz);
+    if (!arr) { json_value_free(root_val); return AC_CHANGES_ERROR; }
+    strs = (char *)(arr + n);
+
+    for (i = 0, w = 0; i < n; i++) {
         JSON_Object *e    = json_array_get_object(entries, i);
-        const char  *path = json_object_get_string(e, "path");
+        const char  *path = e ? json_object_get_string(e, "path") : NULL;
+        size_t       pl;
         if (!path) continue;
-        strncpy(arr[i].path, path, sizeof(arr[i].path) - 1);
-        arr[i].is_dir     = (strcmp(jstr(e, "type"), "dir") == 0);
-        arr[i].size       = jlong(e, "size");
-        strncpy(arr[i].md5, jstr(e, "md5"), sizeof(arr[i].md5) - 1);
-        arr[i].mtime      = jlong(e, "mtime");
-        arr[i].revision   = jlong(e, "revision");
-        arr[i].change_seq = jlong(e, "change_seq");
-        arr[i].id         = jlong(e, "id");
-        arr[i].deleted    = json_object_get_boolean(e, "deleted") == 1;
+        pl = strlen(path) + 1;
+        memcpy(strs, path, pl);
+        arr[w].path       = strs;
+        strs += pl;
+        arr[w].is_dir     = (strcmp(jstr(e, "type"), "dir") == 0);
+        arr[w].size       = jlong(e, "size");
+        strncpy(arr[w].md5, jstr(e, "md5"), sizeof(arr[w].md5) - 1);
+        arr[w].mtime      = jlong(e, "mtime");
+        arr[w].revision   = jlong(e, "revision");
+        arr[w].change_seq = jlong(e, "change_seq");
+        arr[w].id         = jlong(e, "id");
+        arr[w].deleted    = json_object_get_boolean(e, "deleted") == 1;
+        w++;
     }
     json_value_free(root_val);
 
-    *out = arr; *out_n = n;
-    return 1;
+    *out = arr; *out_n = w;
+    return AC_CHANGES_OK;
 }
 
 void cmd_changes_free(AcChange *changes)

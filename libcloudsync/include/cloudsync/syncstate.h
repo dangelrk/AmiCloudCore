@@ -82,6 +82,10 @@ typedef struct {
      * in no baseline and would otherwise only come with the next server
      * change. */
     char selection[33];
+    /* Runs in a row whose remote side came from the server's delta feed
+     * instead of a full listing (phase 6); at SYNC_DELTA_MAX (sync.c) the
+     * next run lists everything again. */
+    int delta_runs;
 } SyncState;
 
 /* Loads <local_root>/.amicloudsync. A missing file is not an error -- it

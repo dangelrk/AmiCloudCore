@@ -87,6 +87,25 @@ typedef struct {
     char token[64];
 } SyncPutResult;
 
+/* One row of the delta feed (changes(), below): the state of a server
+ * path as of change_seq. path is the full server path ('/'-prefixed),
+ * pointing into the same malloc'd block. */
+typedef struct {
+    const char *path;
+    int  is_dir;
+    int  deleted;    /* 1 = gone (deleted, or the old name of a rename) */
+    long size;
+    long mtime;      /* UTC epoch seconds, like list() */
+    char md5[64];
+    long revision;
+    long id;
+    long change_seq;
+} SyncRemoteChange;
+
+#define SYNC_CHANGES_OK       1
+#define SYNC_CHANGES_ERROR    0
+#define SYNC_CHANGES_TOO_OLD (-1)
+
 #define SYNC_PUT_OK        0
 #define SYNC_PUT_ERROR     1
 #define SYNC_PUT_CONFLICT  2   /* condition failed, nothing was written */
@@ -147,6 +166,18 @@ typedef struct SyncTransport {
      * same as it always has for any AmiCloud server that answered
      * cmd_status() with global_revision 0. */
     int (*global_rev)(struct SyncTransport *t, long *global_out);
+
+    /* Optional (NULL = not supported: WebDAV). One page of the delta
+     * feed: what changed at or below remote_root since the counter
+     * `since` (the global_rev() value of an earlier run), tombstones
+     * included, ordered by change_seq; one change_seq never spans two
+     * pages. *next is the since of the next page, *has_more whether there
+     * is one. *out is one malloc'd block (plain free()). Returns
+     * SYNC_CHANGES_OK, SYNC_CHANGES_ERROR or SYNC_CHANGES_TOO_OLD (the
+     * server no longer knows all deletions since then). The kernel uses it
+     * instead of a full list() walk when the counter has moved (phase 6). */
+    int (*changes)(struct SyncTransport *t, const char *remote_root, long since,
+                   SyncRemoteChange **out, int *out_n, long *next, int *has_more);
 
     /* Optional; NULL if the backend holds no per-run resources to
      * release (true for both backends today). */

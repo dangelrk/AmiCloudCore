@@ -642,18 +642,27 @@ static void t_delta_shortcut_ac(void)
     lw(&e, "a.txt", "alpha", T0);
     lw(&e, "d/b.txt", "beta", T0);
     run(&e);
-    run(&e);   /* S9: own uploads moved the counter -> one full scan */
-    CHECK(e.f.calls[FOP_LIST] > 0);
+    run(&e);   /* S9: own uploads moved the counter -> the delta, no listing */
+    CHECK_EQ(e.f.calls[FOP_LIST], 0);
+    CHECK(e.f.changes_calls > 0);
     run(&e);
     CHECK_EQ(e.f.calls[FOP_LIST], 0);
+    CHECK_EQ(e.f.changes_calls, 0);     /* counter unchanged: not even the delta */
     lw(&e, "c.txt", "new local", T0);   /* a local change still uploads */
     run(&e);
     CHECK_EQ(e.f.calls[FOP_LIST], 0);
     CHECK_EQ(e.s.uploaded, 1);
     fake_put_data(&e.f, rp(&e, "a.txt"), "remote change", T0 + 50);
     run(&e);
-    CHECK(e.f.calls[FOP_LIST] > 0);
+    CHECK_EQ(e.f.calls[FOP_LIST], 0);
+    CHECK(e.f.changes_calls > 0);
     CHECK(lhas(&e, "a.txt", "remote change"));
+    /* without a delta feed (old server, WebDAV): the full listing */
+    fake_no_changes(&e.f, 1);
+    fake_put_data(&e.f, rp(&e, "a.txt"), "again", T0 + 60);
+    run(&e);
+    CHECK(e.f.calls[FOP_LIST] > 0);
+    CHECK(lhas(&e, "a.txt", "again"));
     env_free(&e);
 }
 
@@ -1202,6 +1211,225 @@ static void t_trash_dir_edited(void)
     CHECK(fake_has(&e.f, rp(&e, "d/y.txt"), "y edited"));
     CHECK(trashed("1-x.txt", "x"));
     CHECK_EQ(g_trash_dir_calls, 0);
+    env_free(&e);
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 6: remote side from the delta feed (action=changes)            */
+/* ------------------------------------------------------------------ */
+
+/* 1 if both local trees are equal (contents, names), baseline ignored */
+static int same_local_tree(Env *a, Env *b)
+{
+    char cmd[2600];
+    snprintf(cmd, sizeof(cmd), "diff -r -x '.amicloudsync*' '%s' '%s' >/dev/null 2>&1",
+             a->local, b->local);
+    return system(cmd) == 0;
+}
+
+typedef void (*Scenario)(Env *e, int step);
+
+/* runs the same scenario with and without the delta feed; both must end
+ * the same, locally and on the server */
+static void twin(Scenario sc, int steps)
+{
+    Env d, f;
+    int i, delta_pages = 0, delta_lists = 0;
+    env_init(&d, FAKE_AMICLOUD);
+    env_init(&f, FAKE_AMICLOUD);
+    fake_no_changes(&f.f, 1);
+    for (i = 0; i < steps; i++) {
+        sc(&d, i); run(&d);
+        delta_pages += d.f.changes_calls;
+        if (i >= 2) delta_lists += d.f.calls[FOP_LIST];
+        sc(&f, i); run(&f);
+        CHECK_EQ(d.s.errors, f.s.errors);
+        CHECK_EQ(d.s.deleted, f.s.deleted);
+        CHECK_EQ(d.s.downloaded, f.s.downloaded);
+        CHECK_EQ(d.s.uploaded, f.s.uploaded);
+        CHECK(same_local_tree(&d, &f));
+    }
+    CHECK_EQ(d.f.n, f.f.n);
+    for (i = 0; i < d.f.n; i++) {
+        FakeNode *x = &d.f.nodes[i], *y = fake_find(&f.f, x->path);
+        CHECK(y != NULL);
+        if (y) {
+            CHECK_EQ(x->is_dir, y->is_dir);
+            CHECK(x->size == y->size && (x->size == 0 || memcmp(x->data, y->data, (size_t)x->size) == 0));
+        }
+    }
+    CHECK(delta_pages > 0);   /* the delta was really used ... */
+    if (g_verbose) printf("      Delta-Seiten %d, Listings ab Schritt 2: %d\n", delta_pages, delta_lists);
+    env_free(&d);
+    env_free(&f);
+}
+
+static void sc_mixed(Env *e, int step)
+{
+    switch (step) {
+    case 0:
+        lw(e, "a.txt", "alpha", T0);
+        lw(e, "d/x.txt", "x", T0);
+        lw(e, "d/sub/y.txt", "y", T0);
+        lw(e, "keep/k.txt", "k", T0);
+        fake_put_data(&e->f, rp(e, "r1.txt"), "remote 1", T0);
+        break;
+    case 1: /* server: change, add nested, delete a tree, "rename" a folder */
+        fake_put_data(&e->f, rp(e, "a.txt"), "alpha 2", T0 + 10);
+        fake_put_data(&e->f, rp(e, "n/m/deep.txt"), "deep", T0 + 10);
+        fake_remove(&e->f, rp(e, "d"));
+        fake_put_data(&e->f, rp(e, "keep2/k.txt"), "k", T0);
+        fake_remove(&e->f, rp(e, "keep"));
+        break;
+    case 2: /* both sides: local new file, server deletes one, edits another */
+        lw(e, "local.txt", "local", T0 + 20);
+        fake_remove(&e->f, rp(e, "r1.txt"));
+        fake_put_data(&e->f, rp(e, "n/m/deep.txt"), "deeper", T0 + 20);
+        break;
+    case 3: /* directory becomes a file and the other way round */
+        fake_remove(&e->f, rp(e, "n"));
+        fake_put_data(&e->f, rp(e, "n"), "now a file", T0 + 30);
+        fake_remove(&e->f, rp(e, "a.txt"));
+        fake_mkdir(&e->f, rp(e, "a.txt"), T0 + 30);
+        break;
+    case 4: /* delete and recreate the same path within one interval */
+        fake_remove(&e->f, rp(e, "local.txt"));
+        fake_put_data(&e->f, rp(e, "local.txt"), "recreated", T0 + 40);
+        break;
+    default:
+        break;   /* quiet run */
+    }
+}
+static void t_delta_twin_mixed(void) { twin(sc_mixed, 6); }
+
+static void sc_conflict(Env *e, int step)
+{
+    if (step == 0) { lw(e, "c.txt", "base", T0); lw(e, "z/z.txt", "z", T0); }
+    if (step == 1) {
+        lw(e, "c.txt", "local edit", T0 + 5);
+        fake_put_data(&e->f, rp(e, "c.txt"), "remote edit", T0 + 6);
+        lrm(e, "z");
+        fake_put_data(&e->f, rp(e, "z/new.txt"), "new on server", T0 + 6);
+    }
+}
+static void t_delta_twin_conflict(void) { twin(sc_conflict, 4); }
+
+/* no listing at all while the delta is used; every SYNC_DELTA_MAX-th run
+ * (20) lists everything again */
+static void t_delta_full_every_n(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    int i, full = 0, first_full = -1;
+    lw(&e, "a.txt", "a", T0);
+    run(&e);
+    for (i = 1; i <= 25; i++) {
+        char c[32];
+        snprintf(c, sizeof(c), "v%d", i);
+        fake_put_data(&e.f, rp(&e, "a.txt"), c, T0 + i);
+        run(&e);
+        CHECK(lhas(&e, "a.txt", c));
+        if (e.f.calls[FOP_LIST] > 0) { full++; if (first_full < 0) first_full = i; }
+    }
+    CHECK_EQ(full, 1);
+    CHECK_EQ(first_full, 21);
+    env_free(&e);
+}
+
+/* the server no longer knows all deletions (410), or the feed fails:
+ * the full listing, same result */
+static void t_delta_fallbacks(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "a", T0);
+    lw(&e, "b.txt", "b", T0);
+    run(&e);
+    e.f.changes_too_old = 1;
+    fake_remove(&e.f, rp(&e, "a.txt"));
+    run(&e);
+    CHECK(e.f.calls[FOP_LIST] > 0);
+    CHECK(!lexists(&e, "a.txt"));
+    CHECK_EQ(e.s.errors, 0);
+    e.f.changes_too_old = 0;
+    fake_fail(&e.f, FOP_CHANGES, "/");
+    fake_put_data(&e.f, rp(&e, "b.txt"), "b2", T0 + 5);
+    run(&e);
+    CHECK(e.f.calls[FOP_LIST] > 0);
+    CHECK(lhas(&e, "b.txt", "b2"));
+    CHECK_EQ(e.s.errors, 0);
+    env_free(&e);
+}
+
+/* pages: a folder removed in one change (one change_seq, 6 rows) is never
+ * split, the rest arrives over several pages */
+static void t_delta_pages(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    int i;
+    for (i = 0; i < 5; i++) {
+        char p[32];
+        snprintf(p, sizeof(p), "big/f%d.txt", i);
+        lw(&e, p, "x", T0);
+    }
+    lw(&e, "a.txt", "a", T0);
+    run(&e); run(&e);
+    e.f.changes_limit = 2;
+    fake_put_data(&e.f, rp(&e, "n1.txt"), "1", T0);
+    fake_put_data(&e.f, rp(&e, "n2.txt"), "2", T0);
+    fake_remove(&e.f, rp(&e, "big"));
+    fake_put_data(&e.f, rp(&e, "n3.txt"), "3", T0);
+    run(&e);
+    CHECK_EQ(e.f.calls[FOP_LIST], 0);
+    CHECK(e.f.changes_calls >= 3);
+    CHECK(!lexists(&e, "big"));
+    CHECK(lhas(&e, "n1.txt", "1") && lhas(&e, "n2.txt", "2") && lhas(&e, "n3.txt", "3"));
+    CHECK(lhas(&e, "a.txt", "a"));
+    check_idle(&e);
+    env_free(&e);
+}
+
+/* changes outside the remote root ("/rx" is not below "/r"), names that
+ * are never synced, and folders left out by the selection are ignored */
+static void t_delta_filters(void)
+{
+    static const char *const ex[] = { "skip" };
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "a", T0);
+    fake_put_data(&e.f, rp(&e, "skip/s.txt"), "s", T0);
+    set_excludes(ex, 1);
+    run(&e); run(&e);
+    fake_put_data(&e.f, "/rx/other.txt", "other", T0);
+    fake_put_data(&e.f, rp(&e, ".DS_Store"), "finder", T0);
+    fake_put_data(&e.f, rp(&e, "._a.txt"), "apple double", T0);
+    fake_put_data(&e.f, rp(&e, "skip/s2.txt"), "s2", T0);
+    fake_put_data(&e.f, rp(&e, "ok.txt"), "ok", T0);
+    run(&e);
+    set_excludes(NULL, 0);
+    CHECK_EQ(e.f.calls[FOP_LIST], 0);
+    CHECK_EQ(e.s.downloaded, 1);
+    CHECK(lhas(&e, "ok.txt", "ok"));
+    CHECK(!lexists(&e, "other.txt"));
+    CHECK(!lexists(&e, ".DS_Store"));
+    CHECK(!lexists(&e, "skip"));
+    env_free(&e);
+}
+
+/* a local edit of a file that is also new on the server via the delta
+ * keeps both, like the full listing (covered by the twin test too) --
+ * and an unresolved conflict (SKIP mode) disables the delta */
+static void t_delta_conflict_off(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    g_conflict_skip = 1;
+    lw(&e, "c.txt", "v1", T0);
+    run(&e);
+    lw(&e, "c.txt", "local", T0 + 5);
+    fake_put_data(&e.f, rp(&e, "c.txt"), "remote", T0 + 6);
+    run(&e);
+    CHECK_EQ(e.s.conflicts, 1);
+    fake_put_data(&e.f, rp(&e, "other.txt"), "o", T0 + 7);
+    run(&e);
+    CHECK(e.f.calls[FOP_LIST] > 0);   /* had_conflicts: full listing */
+    g_conflict_skip = 0;
     env_free(&e);
 }
 
@@ -2294,6 +2522,13 @@ static const Test tests[] = {
     { "S5: neue lokale Datei in entfernt geloeschtem Ordner (WebDAV)",   t_s5_local_dav, NULL },
     { "S13: feste Ausschlussliste",                  t_exclusions, NULL },
     { "JSON unabhaengig vom Locale",                 t_json_locale, NULL },
+    { "Delta: Zwilling gemischt",                    t_delta_twin_mixed, NULL },
+    { "Delta: Zwilling Konflikt",                    t_delta_twin_conflict, NULL },
+    { "Delta: jeder 20. Lauf listet alles",          t_delta_full_every_n, NULL },
+    { "Delta: 410 und Fehler -> volle Liste",        t_delta_fallbacks, NULL },
+    { "Delta: Seiten",                               t_delta_pages, NULL },
+    { "Delta: Filter",                               t_delta_filters, NULL },
+    { "Delta: Konflikt schaltet ab",                 t_delta_conflict_off, NULL },
     { "Papierkorb: Datei",                           t_trash_file, NULL },
     { "Papierkorb: Ordner als Einheit (AmiCloud)",   t_trash_dir_unit_ac, NULL },
     { "Papierkorb: Ordner als Einheit (WebDAV)",     t_trash_dir_unit_dav, NULL },

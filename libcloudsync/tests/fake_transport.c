@@ -42,6 +42,17 @@ static void parent_of(char *out, size_t sz, const char *p)
     out[l] = '\0';
 }
 
+static void log_change(FakeTransport *f, const char *p)
+{
+    if (f->nlog == f->caplog) {
+        f->caplog = f->caplog ? f->caplog * 2 : 64;
+        f->log = (struct FakeLog *)realloc(f->log, sizeof(*f->log) * (size_t)f->caplog);
+    }
+    f->log[f->nlog].path = strdup(p);
+    f->log[f->nlog].seq = f->global;
+    f->nlog++;
+}
+
 FakeNode *fake_find(FakeTransport *f, const char *path)
 {
     char p[1024];
@@ -79,6 +90,7 @@ static FakeNode *ensure_dir(FakeTransport *f, const char *p, long mtime)
     n->mtime = mtime;
     n->revision = 1;
     f->global++;
+    log_change(f, p);
     return n;
 }
 
@@ -92,6 +104,7 @@ static void set_content(FakeTransport *f, FakeNode *n, const unsigned char *data
     n->revision++;
     n->etag = ++f->next_etag;
     f->global++;
+    log_change(f, n->path);
 }
 
 void fake_put_data(FakeTransport *f, const char *path, const char *content, long mtime)
@@ -118,15 +131,17 @@ int fake_remove(FakeTransport *f, const char *path)
     char p[1024];
     int i, removed = 0;
     norm(p, sizeof(p), path);
+    for (i = 0; i < f->n; i++)
+        if (under(f->nodes[i].path, p)) { f->global++; break; }   /* one change for all */
     for (i = 0; i < f->n; ) {
         if (under(f->nodes[i].path, p)) {
+            log_change(f, f->nodes[i].path);   /* tombstone */
             free(f->nodes[i].path);
             free(f->nodes[i].data);
             f->nodes[i] = f->nodes[--f->n];
             removed++;
         } else i++;
     }
-    if (removed) f->global++;
     return removed;
 }
 
@@ -137,7 +152,15 @@ int fake_has(FakeTransport *f, const char *path, const char *content)
     return n && !n->is_dir && (size_t)n->size == l && memcmp(n->data, content, l) == 0;
 }
 
-void fake_reset_calls(FakeTransport *f) { memset(f->calls, 0, sizeof(f->calls)); }
+void fake_reset_calls(FakeTransport *f) { memset(f->calls, 0, sizeof(f->calls)); f->changes_calls = 0; }
+
+void fake_touch(FakeTransport *f, const char *path)
+{
+    char p[1024];
+    norm(p, sizeof(p), path);
+    f->global++;
+    log_change(f, p);
+}
 
 void fake_fail(FakeTransport *f, FakeOp op, const char *path)
 {
@@ -324,6 +347,7 @@ static int ft_mkdir_quiet(SyncTransport *t, const char *remote_path)
     n = add_node(f, p, 1);
     n->revision = 1;
     f->global++;
+    log_change(f, p);
     return 0;
 }
 
@@ -348,6 +372,85 @@ static int ft_global_rev(SyncTransport *t, long *global_out)
     return 1;
 }
 
+/* The server's action=changes: the current state of every path changed
+ * after `since` below remote_root, ordered by change_seq; a page never
+ * splits one change_seq. */
+typedef struct { const char *path; long seq; } FakeRow;
+
+static int row_cmp(const void *a, const void *b)
+{
+    const FakeRow *x = (const FakeRow *)a, *y = (const FakeRow *)b;
+    if (x->seq != y->seq) return x->seq < y->seq ? -1 : 1;
+    return strcmp(x->path, y->path);
+}
+
+static int ft_changes(SyncTransport *t, const char *remote_root, long since,
+                      SyncRemoteChange **out, int *out_n, long *next, int *has_more)
+{
+    FakeTransport *f = (FakeTransport *)t;
+    char root[1024];
+    FakeRow *rows;
+    SyncRemoteChange *arr;
+    char *strs;
+    size_t strsz = 0;
+    int i, k, nr = 0, take;
+
+    *out = NULL; *out_n = 0; *has_more = 0; *next = since;
+    norm(root, sizeof(root), remote_root[0] ? remote_root : "/");
+    f->changes_calls++;
+    if (enter(f, FOP_CHANGES, root)) return SYNC_CHANGES_ERROR;
+    if (f->changes_too_old) return SYNC_CHANGES_TOO_OLD;
+
+    rows = (FakeRow *)malloc(sizeof(FakeRow) * (size_t)(f->nlog + 1));
+    for (i = 0; i < f->nlog; i++) {
+        if (f->log[i].seq <= since || !under(f->log[i].path, root)) continue;
+        for (k = 0; k < nr; k++)
+            if (strcmp(rows[k].path, f->log[i].path) == 0) break;
+        if (k == nr) { rows[nr].path = f->log[i].path; rows[nr].seq = f->log[i].seq; nr++; }
+        else if (f->log[i].seq > rows[k].seq) rows[k].seq = f->log[i].seq;
+    }
+    qsort(rows, (size_t)nr, sizeof(FakeRow), row_cmp);
+
+    take = nr;
+    if (f->changes_limit > 0 && nr > f->changes_limit) {
+        long cut = rows[f->changes_limit].seq;
+        for (take = 0; take < nr && rows[take].seq < cut; take++) ;
+        if (take == 0)   /* one group larger than the limit: whole */
+            while (take < nr && rows[take].seq == cut) take++;
+        *has_more = take < nr;
+    }
+    if (take > 0) *next = rows[take - 1].seq;
+    if (!*has_more && *next < f->global) *next = f->global;
+
+    for (i = 0; i < take; i++) strsz += strlen(rows[i].path) + 1;
+    arr = (SyncRemoteChange *)calloc(1, sizeof(SyncRemoteChange) * (size_t)(take + 1) + strsz);
+    strs = (char *)(arr + take + 1);
+    for (i = 0; i < take; i++) {
+        FakeNode *n = fake_find(f, rows[i].path);
+        size_t pl = strlen(rows[i].path) + 1;
+        memcpy(strs, rows[i].path, pl);
+        arr[i].path = strs;
+        strs += pl;
+        arr[i].change_seq = rows[i].seq;
+        if (!n) { arr[i].deleted = 1; continue; }
+        arr[i].is_dir = n->is_dir;
+        arr[i].size = n->is_dir ? 0 : n->size;
+        arr[i].mtime = n->mtime;
+        if (!n->is_dir) entry_md5(n, arr[i].md5);
+        arr[i].revision = n->revision;
+        arr[i].id = n->id;
+    }
+    free(rows);
+    *out = arr;
+    *out_n = take;
+    return SYNC_CHANGES_OK;
+}
+
+void fake_no_changes(FakeTransport *f, int off)
+{
+    f->t.changes = (off || f->kind != FAKE_AMICLOUD) ? NULL : ft_changes;
+}
+
 void fake_init(FakeTransport *f, FakeKind kind)
 {
     memset(f, 0, sizeof(*f));
@@ -360,6 +463,7 @@ void fake_init(FakeTransport *f, FakeKind kind)
     f->t.mkdir_quiet = ft_mkdir_quiet;
     f->t.setdate = ft_setdate;
     f->t.global_rev = ft_global_rev;
+    f->t.changes = kind == FAKE_AMICLOUD ? ft_changes : NULL;
     f->t.close = NULL;
     f->global = 1;
 }
@@ -369,5 +473,7 @@ void fake_free(FakeTransport *f)
     int i;
     for (i = 0; i < f->n; i++) { free(f->nodes[i].path); free(f->nodes[i].data); }
     free(f->nodes);
+    for (i = 0; i < f->nlog; i++) free(f->log[i].path);
+    free(f->log);
     memset(f, 0, sizeof(*f));
 }

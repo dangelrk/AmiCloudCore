@@ -98,6 +98,52 @@ static int amicloud_global_rev(SyncTransport *t, long *global_out)
     return cmd_status(t->cfg, NULL, 0, global_out);
 }
 
+/* Rows per page: a 68k Amiga holds a page in memory twice (JSON and
+ * array), so smaller pages there. */
+#ifdef PLATFORM_AMIGA
+#define CHANGES_PAGE 200
+#else
+#define CHANGES_PAGE 1000
+#endif
+
+static int amicloud_changes(SyncTransport *t, const char *remote_root, long since,
+                            SyncRemoteChange **out, int *out_n, long *next, int *has_more)
+{
+    AcChange *ch;
+    int n, i, rc;
+    size_t strsz = 0;
+    SyncRemoteChange *arr;
+    char *strs;
+
+    *out = NULL; *out_n = 0;
+    rc = cmd_changes(t->cfg, remote_root, since, CHANGES_PAGE, &ch, &n, next, has_more);
+    if (rc == AC_CHANGES_TOO_OLD) return SYNC_CHANGES_TOO_OLD;
+    if (rc != AC_CHANGES_OK) return SYNC_CHANGES_ERROR;
+    if (n == 0) { cmd_changes_free(ch); return SYNC_CHANGES_OK; }
+
+    for (i = 0; i < n; i++) strsz += strlen(ch[i].path) + 1;
+    arr = (SyncRemoteChange *)calloc(1, sizeof(SyncRemoteChange) * (size_t)n + strsz);
+    if (!arr) { cmd_changes_free(ch); return SYNC_CHANGES_ERROR; }
+    strs = (char *)(arr + n);
+    for (i = 0; i < n; i++) {
+        size_t pl = strlen(ch[i].path) + 1;
+        memcpy(strs, ch[i].path, pl);
+        arr[i].path       = strs;
+        strs += pl;
+        arr[i].is_dir     = ch[i].is_dir;
+        arr[i].deleted    = ch[i].deleted;
+        arr[i].size       = ch[i].size;
+        arr[i].mtime      = ch[i].mtime;
+        strncpy(arr[i].md5, ch[i].md5, sizeof(arr[i].md5) - 1);
+        arr[i].revision   = ch[i].revision;
+        arr[i].id         = ch[i].id;
+        arr[i].change_seq = ch[i].change_seq;
+    }
+    cmd_changes_free(ch);
+    *out = arr; *out_n = n;
+    return SYNC_CHANGES_OK;
+}
+
 SyncTransport *amicloud_transport_open(const AcConfig *cfg)
 {
     SyncTransport *t = (SyncTransport *)calloc(1, sizeof(SyncTransport));
@@ -110,6 +156,7 @@ SyncTransport *amicloud_transport_open(const AcConfig *cfg)
     t->mkdir_quiet = amicloud_mkdir_quiet;
     t->setdate     = amicloud_setdate;
     t->global_rev  = amicloud_global_rev;
+    t->changes     = amicloud_changes;
     t->close       = NULL;
     return t;
 }

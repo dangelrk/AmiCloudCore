@@ -193,6 +193,171 @@ static int index_remote_from_baseline(SyncState *baseline, SyncIndex *idx)
     return 1;
 }
 
+/* ------------------------------------------------------------------ */
+/* Phase 6: the remote index from the server's delta feed               */
+/* ------------------------------------------------------------------ */
+/* Instead of listing every directory, the last baseline (a mirror of the
+ * remote tree as of its global_revision) is brought up to date with what
+ * changed since -- one or a few requests instead of one per directory.
+ * Every SYNC_DELTA_MAX-th run lists everything anyway, and any doubt
+ * (error, the server no longer knows all deletions, too many pages, no
+ * progress) falls back to the full listing. */
+#define SYNC_DELTA_MAX   20
+#define SYNC_DELTA_PAGES 50
+
+/* the path of a server path relative to remote_root; NULL if not below it */
+static const char *rel_below_root(const char *path, const char *remote_root)
+{
+    size_t rl = strlen(remote_root);
+    while (rl > 0 && remote_root[rl - 1] == '/') rl--;   /* "/" and "" are the root */
+    if (strncmp(path, remote_root, rl) != 0 || path[rl] != '/' || !path[rl + 1]) return NULL;
+    return path + rl + 1;
+}
+
+/* 1 if a component of rel is a name that is never synced (S13) -- the
+ * full listing never descends into such a directory either */
+static int rel_has_excluded_name(const char *rel)
+{
+    char comp[AC_MAX_PATH];
+    while (*rel) {
+        const char *slash = strchr(rel, '/');
+        size_t n = slash ? (size_t)(slash - rel) : strlen(rel);
+        if (n >= sizeof(comp)) n = sizeof(comp) - 1;
+        memcpy(comp, rel, n);
+        comp[n] = '\0';
+        if (sync_name_excluded(comp)) return 1;
+        rel += n;
+        if (*rel == '/') rel++;
+    }
+    return 0;
+}
+
+/* removes everything strictly below rel (kept order) */
+static void remove_below(SyncState *st, const char *rel)
+{
+    size_t l = strlen(rel);
+    int i, w = 0;
+    for (i = 0; i < st->n; i++) {
+        const char *p = st->items[i].path;
+        if (strncmp(p, rel, l) == 0 && p[l] == '/') { free(st->items[i].path); continue; }
+        st->items[w++] = st->items[i];
+    }
+    st->n = w;
+}
+
+/* 1 if path is remote_root itself (trailing '/' ignored) */
+static int is_root_path(const char *path, const char *remote_root)
+{
+    size_t rl = strlen(remote_root), pl = strlen(path);
+    while (rl > 0 && remote_root[rl - 1] == '/') rl--;
+    while (pl > 0 && path[pl - 1] == '/') pl--;
+    return rl > 0 && rl == pl && strncmp(path, remote_root, rl) == 0;
+}
+
+/* applies one change to the remote mirror rs: 1 = done, 0 = out of
+ * memory, 2 = the remote root itself is gone (renamed or deleted) -- the
+ * delta must not be used, S4: a full listing then fails and stops the
+ * run instead of every local file looking deleted on the server */
+static int apply_change(SyncState *rs, const SyncRemoteChange *c, const char *remote_root,
+                        const SyncOptions *o)
+{
+    const char *rel;
+    SyncStateEntry *old;
+    int before;
+    if (is_root_path(c->path, remote_root)) return c->deleted || !c->is_dir ? 2 : 1;
+    rel = rel_below_root(c->path, remote_root);
+    if (!rel || rel_has_excluded_name(rel) || sync_path_excluded(o->excludes, o->n_excludes, rel))
+        return 1;
+    if (c->deleted) {
+        syncstate_remove(rs, rel);
+        remove_below(rs, rel);
+        return 1;
+    }
+    /* its parent directories are there too (the server has rows for
+     * them; this only guards against a hole) */
+    {
+        char par[AC_MAX_PATH];
+        const char *s = rel;
+        while ((s = strchr(s, '/')) != NULL) {
+            size_t n = (size_t)(s - rel);
+            if (n >= sizeof(par)) break;
+            memcpy(par, rel, n);
+            par[n] = '\0';
+            if (!syncstate_find(rs, par)) {
+                before = rs->n;
+                syncstate_upsert(rs, par, 1, 0, 0, "", "", 0, 0, 0);
+                if (rs->n == before) return 0;
+            }
+            s++;
+        }
+    }
+    old = syncstate_find(rs, rel);
+    if (old && old->is_dir && !c->is_dir) remove_below(rs, rel);   /* directory became a file */
+    before = rs->n;
+    syncstate_upsert(rs, rel, c->is_dir, c->is_dir ? 0 : c->size, c->mtime,
+                     c->md5, c->md5 /* token: AmiCloud mirrors its md5, as list() */,
+                     c->revision, c->id, 0);
+    return old || rs->n > before;
+}
+
+/* 1 = idx filled from base + delta; 0 = not usable, list everything;
+ * -1 = out of memory */
+static int index_remote_from_delta(SyncTransport *t, const char *remote_root,
+                                   const SyncOptions *o, const SyncState *base, SyncIndex *idx,
+                                   int verbose)
+{
+    SyncState rs;
+    long since = base->global_revision, next = 0;
+    int more = 1, pages = 0, i;
+
+    if (!syncstate_copy(&rs, base)) return -1;
+    while (more) {
+        SyncRemoteChange *ch = NULL;
+        int n = 0, rc;
+        if (++pages > SYNC_DELTA_PAGES) {
+            if (verbose) ui_notify(UI_INFO, "Sync: viele Aenderungen am Server -- liste alles");
+            syncstate_free(&rs);
+            return 0;
+        }
+        rc = t->changes(t, remote_root, since, &ch, &n, &next, &more);
+        if (rc != SYNC_CHANGES_OK) {
+            if (verbose)
+                ui_notify(UI_INFO, rc == SYNC_CHANGES_TOO_OLD
+                          ? "Sync: letzter Abgleich zu lange her -- liste alles"
+                          : "Sync: Aenderungsliste nicht lesbar -- liste alles");
+            free(ch);
+            syncstate_free(&rs);
+            return 0;
+        }
+        for (i = 0; i < n; i++) {
+            int r = apply_change(&rs, &ch[i], remote_root, o);
+            if (r != 1) {
+                if (r == 2 && verbose)
+                    ui_notify(UI_INFO, "Sync: Server-Ordner %s geaendert -- liste alles", remote_root);
+                free(ch);
+                syncstate_free(&rs);
+                return r == 0 ? -1 : 0;
+            }
+        }
+        free(ch);
+        if (more && next <= since) {   /* no progress: never loop */
+            syncstate_free(&rs);
+            return 0;
+        }
+        since = next;
+    }
+    for (i = 0; i < rs.n; i++) {
+        const SyncStateEntry *e = &rs.items[i];
+        if (!index_add(idx, e->path, e->is_dir, e->size, e->mtime, e->md5, e->token,
+                       e->revision, e->server_id)) {
+            syncstate_free(&rs);
+            return -1;
+        }
+    }
+    syncstate_free(&rs);
+    return 1;
+}
+
 /* S13: names never synced, on either side and on every client alike:
  * the kernel's own files, metadata litter of other systems, Office lock
  * files, partial downloads, and names the server or other systems would
@@ -1047,6 +1212,7 @@ static int build_effective_state(SyncState *out, const SyncState *new_st,
     free(pend);
     out->global_revision = new_st->global_revision;
     out->had_conflicts   = new_st->had_conflicts;
+    out->delta_runs      = new_st->delta_runs;
     memcpy(out->selection, new_st->selection, sizeof(out->selection));
     return 1;
 }
@@ -1531,6 +1697,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     int         run_name_max = 255;
     int         selection_changed;
     int         errors_before, viruses_before;   /* before the current action */
+    int         use_delta = 0;   /* remote index from the delta feed (phase 6) */
 
     if (!opts) { sync_options_init(&defaults); opts = &defaults; }
     dry_run = opts->dry_run;
@@ -1630,11 +1797,29 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     use_baseline_as_remote = status_ok && !old_st.had_conflicts && old_st.n > 0 &&
                             !selection_changed &&
                             (server_global == old_st.global_revision);
+    /* Phase 6: the counter moved -- bring the baseline up to date with the
+     * delta feed instead of listing every directory (same conditions as
+     * above, plus a full listing every SYNC_DELTA_MAX-th run) */
+    use_delta = !use_baseline_as_remote && status_ok && t->changes && !dry_run &&
+                !old_st.had_conflicts && old_st.n > 0 && !selection_changed &&
+                old_st.global_revision > 0 && old_st.delta_runs < SYNC_DELTA_MAX;
 
     /* S1: both trees must be scanned completely, or nothing happens at
      * all -- a missing subtree would otherwise look deleted. */
     errpath[0] = '\0';
-    if (use_baseline_as_remote)
+    if (use_delta) {
+        int d = index_remote_from_delta(t, remote_root, opts, &old_st, &ridx, verbose);
+        if (d < 0) {
+            ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: kein Speicher");
+            out->errors++;
+            out->aborted = 1;
+            goto out_free;
+        }
+        if (d == 0) { index_free(&ridx); index_init(&ridx); use_delta = 0; }
+    }
+    if (use_delta)
+        scan_ok = 1;
+    else if (use_baseline_as_remote)
         scan_ok = index_remote_from_baseline(&old_st, &ridx);
     else if (dry_run && old_st.n == 0 && !remote_root_exists(t, remote_root))
         scan_ok = 1;   /* preview of a first sync: the root comes later */
@@ -2222,6 +2407,9 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
      * otherwise never be seen again). */
     new_st.global_revision = (status_ok && !incomplete) ? server_global
                                                         : old_st.global_revision;
+    /* the full listing every SYNC_DELTA_MAX-th run (phase 6) */
+    new_st.delta_runs = use_delta ? old_st.delta_runs + 1
+                      : use_baseline_as_remote ? old_st.delta_runs : 0;
 
     if (!dry_run) {
         if (!syncstate_save(local_root, &new_st)) {

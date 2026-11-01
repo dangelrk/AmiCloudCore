@@ -114,14 +114,21 @@ int cmd_status_ex(const AcConfig *cfg, AcStatus *out);
  * cmd_info() prints file info. Returns 0 on success. */
 int cmd_quota(const AcConfig *cfg);
 
-/* Delta source for a metadata-based sync (AmiOwnCloud docs/design/
- * 07_Sync_Metadaten.md): every row for this user with change_seq >
- * since, tombstones (AcChange.deleted) included -- unlike cmd_list_raw(),
- * not scoped to one directory. global_revision_out (may be NULL)
- * receives the server's current counter, so a caller can persist "synced
- * up to here" without a second cmd_status() round-trip. Returns 1 on
- * success (even with zero changes, *out_n==0), 0 on error. */
-int  cmd_changes(const AcConfig *cfg, long since, AcChange **out, int *out_n, long *global_revision_out);
+/* Delta source for a metadata-based sync (action=changes, AmiCloud
+ * docs/api/API.md): one page of the rows of this user with change_seq >
+ * since at or below prefix (a remote path, "" or "/" = everything),
+ * tombstones (AcChange.deleted) included, ordered by change_seq. A page
+ * holds at most `limit` rows (0 = server default) but never splits one
+ * change_seq. *next_out is the since of the next page, *has_more_out
+ * says whether there is one. *out is one malloc'd block (free with
+ * cmd_changes_free()). Returns AC_CHANGES_OK, AC_CHANGES_ERROR or
+ * AC_CHANGES_TOO_OLD (410: tombstones before since are gone -- the
+ * caller has to list everything instead). */
+#define AC_CHANGES_OK       1
+#define AC_CHANGES_ERROR    0
+#define AC_CHANGES_TOO_OLD (-1)
+int  cmd_changes(const AcConfig *cfg, const char *prefix, long since, int limit,
+                 AcChange **out, int *out_n, long *next_out, int *has_more_out);
 void cmd_changes_free(AcChange *changes);
 
 /* Server-side name search (action=search, AmiCloud docs/design/search-plan.md):

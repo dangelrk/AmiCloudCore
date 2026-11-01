@@ -58,7 +58,7 @@ typedef struct {
  * path and needs the same length budget as any other full remote path
  * (AC_MAX_PATH elsewhere), not a directory-entry-sized name[256]. */
 typedef struct {
-    char path[1024];
+    const char *path;  /* '/'-prefixed; points into the same malloc'd block */
     int  is_dir;
     long size;
     char md5[33];
