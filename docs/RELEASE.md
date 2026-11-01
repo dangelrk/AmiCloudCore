@@ -96,6 +96,7 @@ python3 core/tools/lhapack.py build/release/AmiSuite-<version>.lha /tmp/suite \
 
 ```sh
 make server-release   # -> build/release/<Projekt>-Server-<version>.tar.gz
+make server-test      # baut das Paket und prüft es (vor dem Hochladen)
 ```
 
 Enthält `server/` (ohne `config.php`), `LICENSE`, die Zusatzdateien aus
@@ -105,6 +106,26 @@ Enthält `server/` (ohne `config.php`), `LICENSE`, die Zusatzdateien aus
 (`SERVER_DOC_HEADING` im Projekt-Makefile). Kommt eine neue Migration dazu,
 in `install/server/README.md` eintragen, ab welcher Version sie nötig ist.
 Werkzeug: `tools/serverpack.py`.
+
+`make server-test` (Werkzeug `tools/servertest.py`) prüft zuerst den
+Inhalt: `server/` genau wie im Repo, keine `config.php`, keine macOS-Reste,
+alles root:root, `php -l` ohne Fehler. Dann installiert es das Paket so,
+wie die `INSTALL.md` es beschreibt, in einem Wegwerf-Verzeichnis:
+- eigene MariaDB, nur über Socket erreichbar,
+- `sql/schema.sql` einspielen,
+- DB-Benutzer mit genau den Rechten aus der GRANT-Zeile,
+- `config.php` aus `config.php.example`,
+- Administrator per `bin/*-admin.php`,
+- `php -S`.
+
+Gegen diesen Server läuft `SERVER_TEST` aus dem Projekt-Makefile:
+- AmiCloud: `test_api.sh` und `test_changes.py` aus dem Paket,
+- AmiVCS: `scripts/test_server.sh`, ein Rundlauf mit der PC-CLI (braucht
+  `make pc`).
+
+Voraussetzungen sind `php` mit `pdo_mysql` und MariaDB
+(`mariadb-install-db`, `mariadbd`, `mariadb`). Mit `SERVERTEST_KEEP=1`
+bleibt das Verzeichnis nach einem Fehler zur Fehlersuche stehen.
 
 ### AmiCloud Desktop (macOS)
 
