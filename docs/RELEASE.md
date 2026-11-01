@@ -3,7 +3,10 @@
 Gilt für alle drei Projekte, die diesen Core als Submodul `core/` benutzen.
 Erstes Release: **v0.1 vom 31.10.2026** (Tags in allen vier Repos,
 GitHub-Releases bei AmiCloud, AmiOwnCloud und AmiVCS). Zweites Release:
-**v0.2 vom 31.10.2026** (Sync-Datensicherheit, Mindest-CPU 68020). In Arbeit: **0.3** (Umlaute, Virenprüfung, Konflikte behalten beide Fassungen, Schutz vor Massenlöschung, Ordnerauswahl, JSON unabhängig vom Locale).
+**v0.2 vom 31.10.2026** (Sync-Datensicherheit, Mindest-CPU 68020). Drittes Release:
+**v0.3 vom 01.11.2026** (Umlaute, Virenprüfung, Konflikte behalten beide
+Fassungen, Schutz vor Massenlöschung, Ordnerauswahl, JSON unabhängig vom
+Locale, schrittweiser Abgleich, erstes Mac-Programm AmiCloud Desktop).
 
 ## 1. Version hochsetzen – Pflicht
 
@@ -88,6 +91,20 @@ done
 python3 core/tools/lhapack.py build/release/AmiSuite-<version>.lha /tmp/suite \
   AmiCloud AmiCloud.info AmiOwnCloud AmiOwnCloud.info AmiVCS AmiVCS.info
 ```
+
+### AmiCloud Desktop (macOS)
+
+Nur im Projekt AmiCloud, auf einem Mac mit Qt 6 aus Homebrew:
+
+```sh
+scripts/make_desktop_dmg.sh   # -> build/release/AmiCloud-Desktop-<version>.dmg
+```
+
+Das Skript bricht ab, wenn das Bundle noch auf Homebrew verweist. Vorher
+den Selbsttest gegen einen Testserver laufen lassen (CMake-Ziel
+`amicloud-desktop-selftest`, Umgebung `AC_TEST_SERVER/USER/PASS`). Die .dmg
+kommt an das AmiCloud-Release. Windows und Linux baut der Autor auf dem
+jeweiligen System.
 
 ## 4. Im Emulator testen
 
