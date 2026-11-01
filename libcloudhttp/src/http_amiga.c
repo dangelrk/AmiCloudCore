@@ -75,6 +75,7 @@
 #include "http.h"
 #include "base64.h"
 #include "ui_hooks.h"
+#include "authguard.h"
 
 /* ------------------------------------------------------------------ */
 /* Library bases (opened in http_init)                                 */
@@ -1239,6 +1240,14 @@ static HttpResponse *do_request(const char *method, const char *url,
         return resp;
     }
 
+    /* Credentials this server already rejected: answer at once. */
+    resp = authguard_check(url, auth);
+    if (resp) {
+        HLOG("http: login was rejected before -- not trying again yet (HTTP %d)\n",
+             resp->status_code);
+        return resp;
+    }
+
     auth_val = make_basic_auth(auth);
     if (!auth_val) return NULL;
     resp = calloc(1, sizeof(HttpResponse));
@@ -1328,6 +1337,7 @@ static HttpResponse *do_request(const char *method, const char *url,
     resp->body     = body;
     resp->body_len = body_len;
     HLOG("http: status %d, %ld body bytes\n", resp->status_code, delivered);
+    authguard_note(url, auth, resp->status_code);
     return resp;
 }
 

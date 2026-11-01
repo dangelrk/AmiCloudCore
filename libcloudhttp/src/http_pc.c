@@ -10,6 +10,7 @@
 #include "http.h"
 #include "base64.h"
 #include "ui_hooks.h"
+#include "authguard.h"
 #include <curl/curl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -225,6 +226,8 @@ HttpResponse *http_request_hdr(const char *method, const char *url,
                                const char *upload_data, long upload_len,
                                int verify_ssl)
 {
+    HttpResponse *held = authguard_check(url, auth);
+    if (held) return held;
     struct curl_slist *hdrs = NULL;
     CURL *curl = curl_setup(url, auth, verify_ssl, &hdrs);
     if (!curl) return NULL;
@@ -291,6 +294,7 @@ HttpResponse *http_request_hdr(const char *method, const char *url,
     resp->body_len = (long)buf.size;
 
     curl_slist_free_all(hdrs);
+    authguard_note(url, auth, resp->status_code);
     return resp;
 }
 
@@ -299,6 +303,8 @@ HttpResponse *http_download(const char *url, const char *auth,
                             FILE *fp, int verify_ssl, Md5Ctx *md5ctx,
                             const char *display_name)
 {
+    HttpResponse *held = authguard_check(url, auth);
+    if (held) return held;
     struct curl_slist *hdrs = NULL;
     CURL *curl = curl_setup(url, auth, verify_ssl, &hdrs);
     if (!curl) return NULL;
@@ -331,6 +337,7 @@ HttpResponse *http_download(const char *url, const char *auth,
     resp->aborted = pc.aborted;
 
     curl_slist_free_all(hdrs);
+    authguard_note(url, auth, resp->status_code);
     return resp;
 }
 
@@ -339,6 +346,8 @@ HttpResponse *http_upload(const char *url, const char *auth,
                           FILE *fp, long fsize, int verify_ssl,
                           const char *display_name)
 {
+    HttpResponse *held = authguard_check(url, auth);
+    if (held) return held;
     struct curl_slist *hdrs = NULL;
     CURL *curl = curl_setup(url, auth, verify_ssl, &hdrs);
     if (!curl) return NULL;
@@ -382,6 +391,7 @@ HttpResponse *http_upload(const char *url, const char *auth,
     resp->body_len = (long)buf.size;
 
     curl_slist_free_all(hdrs);
+    authguard_note(url, auth, resp->status_code);
     return resp;
 }
 
@@ -390,6 +400,8 @@ HttpResponse *http_upload_hdr(const char *method, const char *url, const char *a
                               const char *extra_headers, FILE *fp, long fsize,
                               int verify_ssl, const char *display_name)
 {
+    HttpResponse *held = authguard_check(url, auth);
+    if (held) return held;
     struct curl_slist *hdrs = NULL;
     CURL *curl = curl_setup(url, auth, verify_ssl, &hdrs);
     if (!curl) return NULL;
@@ -457,6 +469,7 @@ HttpResponse *http_upload_hdr(const char *method, const char *url, const char *a
     resp->body_len = (long)buf.size;
 
     curl_slist_free_all(hdrs);
+    authguard_note(url, auth, resp->status_code);
     return resp;
 }
 

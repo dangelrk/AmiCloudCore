@@ -12,7 +12,8 @@
 #   make amiga   all library objects with the vbcc cross compiler
 #                (export VBCC=/path/to/vbcc; optional VC_CONFIG=..., see
 #                the projects' docs/BUILD.md)
-#   make test    host unit tests of the sync kernel (libcloudsync/tests,
+#   make test    host unit tests (libcloudhttp/tests: login guard;
+#                libcloudsync/tests: sync kernel,
 #                no libcurl needed, built with ASan/UBSan)
 #   make clean
 
@@ -35,9 +36,11 @@ amiga:
 	    $(MAKE) -C $$l -f Makefile.amiga-cross $(if $(VC_CONFIG),TARGET=+$(VC_CONFIG)); done
 
 test:
+	$(MAKE) -C libcloudhttp/tests
 	$(MAKE) -C libcloudsync/tests
 
 clean:
+	-$(MAKE) -C libcloudhttp/tests clean
 	-$(MAKE) -C libcloudsync/tests clean
 	-for l in $(LIBS); do $(MAKE) -C $$l -f Makefile.pc clean LIBDIR=$(CURDIR)/lib/pc; \
 	    $(MAKE) -C $$l -f Makefile.amiga-cross clean; done
