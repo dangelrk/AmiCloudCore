@@ -8,7 +8,8 @@ GitHub-Releases bei AmiCloud, AmiOwnCloud und AmiVCS). Zweites Release:
 Fassungen, Schutz vor Massenlöschung, Ordnerauswahl, JSON unabhängig vom
 Locale, schrittweiser Abgleich, erstes Mac-Programm AmiCloud Desktop). Viertes Release: **v0.4 vom 01.11.2026** (SetDate in den Handlern,
 WebDAV erkennt Server-Änderungen auch bei gleichem ETag, Autosync-Intervall
-der Commodity, Server-Paket im Amiga-Archiv).
+der Commodity, Server-Paket im Amiga-Archiv). Fünftes Release: **v0.5 vom 01.11.2026**
+(kein erneuter Anmeldeversuch mit abgelehnten Zugangsdaten).
 
 ## 1. Version hochsetzen – Pflicht
 
