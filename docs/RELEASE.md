@@ -6,7 +6,9 @@ GitHub-Releases bei AmiCloud, AmiOwnCloud und AmiVCS). Zweites Release:
 **v0.2 vom 31.10.2026** (Sync-Datensicherheit, Mindest-CPU 68020). Drittes Release:
 **v0.3 vom 01.11.2026** (Umlaute, Virenprüfung, Konflikte behalten beide
 Fassungen, Schutz vor Massenlöschung, Ordnerauswahl, JSON unabhängig vom
-Locale, schrittweiser Abgleich, erstes Mac-Programm AmiCloud Desktop).
+Locale, schrittweiser Abgleich, erstes Mac-Programm AmiCloud Desktop). Viertes Release: **v0.4 vom 01.11.2026** (SetDate in den Handlern,
+WebDAV erkennt Server-Änderungen auch bei gleichem ETag, Autosync-Intervall
+der Commodity, Server-Paket im Amiga-Archiv).
 
 ## 1. Version hochsetzen – Pflicht
 
