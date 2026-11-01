@@ -377,6 +377,30 @@ static void t_remote_change_downloads(FakeKind k)
 static void t_remote_change_ac(void) { t_remote_change_downloads(FAKE_AMICLOUD); }
 static void t_remote_change_dav(void) { t_remote_change_downloads(FAKE_WEBDAV); }
 
+/* ownCloud 11 keeps the ETag when a file is rewritten within the same
+ * second (seen against cloud.planet-rk.de: 25 -> 22 bytes, same ETag).
+ * Another size alone must count as a remote change, or the edit is
+ * missed and a later local change overwrites it (If-Match passes). */
+static void t_dav_same_etag_new_size(void)
+{
+    Env e; env_init(&e, FAKE_WEBDAV);
+    FakeNode *n;
+    long old;
+    lw(&e, "a.txt", "locally modified content\n", T0);
+    run(&e); run(&e);
+    n = fake_find(&e.f, rp(&e, "a.txt"));
+    CHECK(n != NULL);
+    old = n->etag;
+    fake_put_data(&e.f, rp(&e, "a.txt"), "changed on the server\n", T0);
+    n->etag = old;
+    run(&e);
+    CHECK_EQ(e.s.downloaded, 1);
+    CHECK_EQ(e.s.uploaded, 0);
+    CHECK(lhas(&e, "a.txt", "changed on the server\n"));
+    check_idle(&e);
+    env_free(&e);
+}
+
 /* Today: changed differently on both sides = conflict, both sides kept
  * unchanged, reported again on every run (plan section 4: keep both). */
 static void t_both_changed_conflict(FakeKind k)
@@ -2583,6 +2607,7 @@ static const Test tests[] = {
     { "lokal geaendert -> hoch (WebDAV)",            t_local_change_dav, NULL },
     { "entfernt geaendert -> runter (AmiCloud)",     t_remote_change_ac, NULL },
     { "entfernt geaendert -> runter (WebDAV)",       t_remote_change_dav, NULL },
+    { "WebDAV: gleicher ETag, andere Groesse",       t_dav_same_etag_new_size, NULL },
     { "beidseitig geaendert: Konflikt (AmiCloud)",   t_both_changed_ac, NULL },
     { "beidseitig geaendert: Konflikt (WebDAV)",     t_both_changed_dav, NULL },
     { "beidseitig gleich geaendert (AmiCloud)",      t_both_changed_same_ac, NULL },

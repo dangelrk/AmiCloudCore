@@ -1258,7 +1258,12 @@ static void save_checkpoint(const char *local_root, const SyncState *new_st,
  *   - only a hash (no revisions);
  *   - WebDAV's opaque ETag against the remembered one. An empty
  *     remembered token means "not known yet" (right after our own upload),
- *     which is not a change -- the next listing fills it in. */
+ *     which is not a change -- the next listing fills it in.
+ *     The ETag alone is not enough: ownCloud 11 hands out the SAME ETag
+ *     when a file is rewritten within the same second (seen with 25 ->
+ *     22 bytes), so another size counts as a change too. The baseline
+ *     holds the server's size (or ours right after an upload, which is
+ *     the same). */
 static int remote_file_changed(const SyncEntry *re, const SyncStateEntry *be)
 {
     if (be->server_id > 0 && re->id > 0 && re->id != be->server_id) return 1;
@@ -1267,6 +1272,7 @@ static int remote_file_changed(const SyncEntry *re, const SyncStateEntry *be)
         return re->md5[0] && be->md5[0] && strcmp(re->md5, be->md5) != 0;
     }
     if (re->md5[0]) return strcmp(re->md5, be->md5) != 0;
+    if (re->size != be->size) return 1;
     return be->token[0] && strcmp(re->token, be->token) != 0;
 }
 
