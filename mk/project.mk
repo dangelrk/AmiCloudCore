@@ -55,7 +55,7 @@ export VBCC
 AMIGA_MAKEFLAGS = $(if $(VC_CONFIG),TARGET=+$(VC_CONFIG))
 
 .PHONY: all pc qt amiga amiga-clean build-amiga-script verify-amiga-script dist-amiga \
-        release check-guide fsuae install clean help
+        release server-release check-guide fsuae install clean help
 
 all: pc
 
@@ -66,6 +66,7 @@ help:
 	@echo "  make amiga                AmigaOS-Programme per vbcc-Cross-Compiler (bin/amiga/)"
 	@echo "  make dist-amiga           Amiga-Installationsschublade unter $(DIST_DIR)/"
 	@echo "  make release              ... dazu $(RELEASE_DIR)/$(PROJECT)-$(VERSION).lha + .readme"
+	@echo "  make server-release       Server-Paket $(RELEASE_DIR)/$(PROJECT)-Server-$(VERSION).tar.gz"
 	@echo "  make build-amiga-script   Build-Amiga (natives Amiga-Buildskript) neu erzeugen"
 	@echo "  make verify-amiga-script  ... und auf dem Host mit vbcc gegenpruefen"
 	@echo "  make check-guide          AmigaGuide-Handbuch(er) in docs/user/ pruefen"
@@ -147,6 +148,14 @@ release:
 	@if command -v lha >/dev/null 2>&1; then \
 	    lha t $(RELEASE_DIR)/$(PROJECT)-$(VERSION).lha >/dev/null && echo "lha t: Archiv in Ordnung"; fi
 	@ls -l $(RELEASE_DIR)/$(PROJECT)-$(VERSION).*
+
+# Server package (projects with a server/ folder): server files, LICENSE,
+# SERVER_EXTRA (source[:target]) and INSTALL.md = install/server/README.md
+# plus the section SERVER_DOC_HEADING of docs/INSTALL.md.
+server-release:
+	@test -n "$(VERSION)" || { echo "VERSION unbekannt (AC_VERSION nicht gefunden)"; exit 1; }
+	@test -n "$(SERVER_DOC_HEADING)" || { echo "$(PROJECT) hat kein Server-Paket (SERVER_DOC_HEADING fehlt)"; exit 1; }
+	python3 core/tools/serverpack.py $(PROJECT) $(VERSION) $(RELEASE_DIR) "$(SERVER_DOC_HEADING)" $(SERVER_EXTRA)
 
 # AmigaGuide syntax/encoding check (nodes, links, Latin-1, line length).
 check-guide:

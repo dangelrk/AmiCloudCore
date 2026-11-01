@@ -92,6 +92,20 @@ python3 core/tools/lhapack.py build/release/AmiSuite-<version>.lha /tmp/suite \
   AmiCloud AmiCloud.info AmiOwnCloud AmiOwnCloud.info AmiVCS AmiVCS.info
 ```
 
+### Server-Pakete (AmiCloud, AmiVCS)
+
+```sh
+make server-release   # -> build/release/<Projekt>-Server-<version>.tar.gz
+```
+
+Enthält `server/` (ohne `config.php`), `LICENSE`, die Zusatzdateien aus
+`SERVER_EXTRA` und eine `INSTALL.md`. Die setzt sich zusammen aus
+`install/server/README.md` (Inhalt, Aktualisieren, Migrationen je Version,
+`@VERSION@`) und dem Server-Abschnitt aus `docs/INSTALL.md`
+(`SERVER_DOC_HEADING` im Projekt-Makefile). Kommt eine neue Migration dazu,
+in `install/server/README.md` eintragen, ab welcher Version sie nötig ist.
+Werkzeug: `tools/serverpack.py`.
+
 ### AmiCloud Desktop (macOS)
 
 Nur im Projekt AmiCloud, auf einem Mac mit Qt 6 aus Homebrew:
@@ -164,7 +178,9 @@ Commits und Push nur, wenn der Nutzer es ausdrücklich will.
      --title "<Projekt> <version>" --notes-file notes.md \
      build/release/<Projekt>-<version>.lha build/release/<Projekt>-<version>.readme
    ```
-   `AmiSuite-<version>.lha` kommt zusätzlich an das AmiCloud-Release.
+   `AmiSuite-<version>.lha` und `AmiCloud-Desktop-<version>.dmg` kommen
+   zusätzlich an das AmiCloud-Release, `<Projekt>-Server-<version>.tar.gz`
+   an AmiCloud bzw. AmiVCS.
    Release-Text auf Deutsch, Aufbau wie bei v0.1: Kurzbeschreibung,
    Installation, Aktualisieren, Dateien. Zusätzlich: **Was ist neu.**
    Der Core bekommt nur einen Tag, kein Release.
