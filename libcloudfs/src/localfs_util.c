@@ -264,3 +264,23 @@ int localfs_virus_check(const char *path, long max_bytes, char *name_out, size_t
 }
 #endif
 
+/* ------------------------------------------------------------------ */
+/* Local trash hook (see localfs.h)                                     */
+/* ------------------------------------------------------------------ */
+static LocalTrashFn g_trash_hook = NULL;
+
+void localfs_set_trash_hook(LocalTrashFn fn)
+{
+    g_trash_hook = fn;
+}
+
+int localfs_trash_active(void)
+{
+    return g_trash_hook != NULL;
+}
+
+int localfs_trash(const char *path, int is_dir)
+{
+    if (g_trash_hook) return g_trash_hook(path, is_dir) ? 1 : 0;
+    return localfs_remove(path);
+}

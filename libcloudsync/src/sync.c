@@ -1368,6 +1368,117 @@ static int del_ptr_cmp(const void *a, const void *b)
     return strcmp(bb->relpath, aa->relpath);
 }
 
+/* ------------------------------------------------------------------ */
+/* Phase 6: local trash -- whole directories as one unit                */
+/* ------------------------------------------------------------------ */
+
+/* number of entries below path on disk (recursively), names that are
+ * never synced not counted; stops counting past limit. -1 on error. */
+static long count_local_tree(const char *path, long limit)
+{
+    LocalDir *d;
+    LocalDirEntry e;
+    long n = 0;
+    if (!(d = localfs_opendir(path))) return -1;
+    while (n <= limit && localfs_readdir(d, &e)) {
+        char child[AC_MAX_PATH];
+        if (sync_name_excluded(e.name)) continue;
+        n++;
+        if (e.is_dir) {
+            long sub;
+            localfs_join(child, sizeof(child), path, e.name);
+            sub = count_local_tree(child, limit - n);
+            if (sub < 0) { localfs_closedir(d); return -1; }
+            n += sub;
+        }
+    }
+    localfs_closedir(d);
+    return n;
+}
+
+/* first index in v (sorted ascending by relpath) whose relpath >= key */
+static int lower_bound_rel(SyncAction **v, int n, const char *key)
+{
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (strcmp(v[mid]->relpath, key) < 0) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+}
+
+static int is_trash_dir_candidate(const SyncAction *a)
+{
+    return a->type == SA_DEL_LOCAL && a->is_dir && !a->declined && !a->done;
+}
+
+/* With a trash hook, a directory deleted on the server goes to the trash
+ * as ONE unit instead of file by file (plan section 5) -- but only if the
+ * run deletes everything in it and nothing changed since the scan: every
+ * file as scanned (S7) and exactly as many entries on disk as delete
+ * actions below it (nothing new, nothing left out by the selection).
+ * Otherwise the main loop handles that directory item by item. Handled
+ * actions are marked done. */
+static void trash_whole_dirs(SyncActions *acts, SyncSummary *out, int *stopped)
+{
+    SyncAction **v;
+    int i, n = 0;
+    v = (SyncAction **)malloc(sizeof(SyncAction *) * (size_t)(acts->n ? acts->n : 1));
+    if (!v) return;   /* no memory: item by item */
+    for (i = 0; i < acts->n; i++)
+        if (acts->items[i].type == SA_DEL_LOCAL) v[n++] = &acts->items[i];
+    qsort(v, (size_t)n, sizeof(SyncAction *), act_ptr_relpath_cmp);
+
+    for (i = 0; i < n; i++) {
+        SyncAction *d = v[i];
+        char key[AC_MAX_PATH], *slash;
+        int first, j, ok = 1, top = 1;
+        long nchildren = 0, ondisk;
+
+        if (!is_trash_dir_candidate(d)) continue;
+        /* topmost only: an ancestor that is a candidate takes this along */
+        snprintf(key, sizeof(key), "%s", d->relpath);
+        while (top && (slash = strrchr(key, '/')) != NULL) {
+            int k;
+            *slash = '\0';
+            k = lower_bound_rel(v, n, key);
+            if (k < n && strcmp(v[k]->relpath, key) == 0 && is_trash_dir_candidate(v[k])) top = 0;
+        }
+        if (!top) continue;
+
+        snprintf(key, sizeof(key), "%s/", d->relpath);
+        first = lower_bound_rel(v, n, key);
+        for (j = first; j < n && strncmp(v[j]->relpath, key, strlen(key)) == 0; j++) {
+            nchildren++;
+            if (v[j]->declined || v[j]->done ||
+                (!v[j]->is_dir && !local_as_scanned(v[j])))
+                ok = 0;
+        }
+        if (!ok) continue;
+        ondisk = count_local_tree(d->lpath, nchildren + 1);
+        if (ondisk != nchildren) continue;
+
+        if (ui_break_pending()) { *stopped = 1; break; }   /* S2 */
+        if (localfs_trash(d->lpath, 1)) {
+            out->deleted += (int)nchildren + 1;
+            d->done = 1;
+            for (j = first; j < n && strncmp(v[j]->relpath, key, strlen(key)) == 0; j++)
+                v[j]->done = 1;
+        } else {
+            ui_notify(UI_WARN, "%s: Papierkorb nicht moeglich -- nicht geloescht", d->lpath);
+            ac_log_printf("sync: Papierkorb fehlgeschlagen: %s\n", d->lpath);
+            out->errors++;
+            d->failed = 1;
+            d->done = 1;
+            for (j = first; j < n && strncmp(v[j]->relpath, key, strlen(key)) == 0; j++) {
+                v[j]->failed = 1;
+                v[j]->done = 1;
+            }
+        }
+    }
+    free(v);
+}
+
 /* 1 if remote_root can be listed (only used for a dry first sync) */
 static int remote_root_exists(SyncTransport *t, const char *remote_root)
 {
@@ -2001,10 +2112,13 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 del_ptrs[del_n++] = &acts.items[i];
         }
         qsort(del_ptrs, (size_t)del_n, sizeof(SyncAction *), del_ptr_cmp);
+        if (!dry_run && !stopped && localfs_trash_active())
+            trash_whole_dirs(&acts, out, &stopped);
 
         for (i = 0; i < del_n; i++) {
             SyncAction *act = del_ptrs[i];
             if (act->declined) continue;   /* the user said no (mass deletion) */
+            if (act->done) continue;       /* went to the trash with its directory */
             /* S2: a stopped run never deletes */
             if (!dry_run && !stopped && ui_break_pending()) stopped = 1;
             if (stopped) { act->skipped = 1; continue; }
@@ -2022,8 +2136,13 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
                 if (clear == 0) {
                     act->skipped = 1;
                     ui_notify(UI_WARN, "%s enthaelt Neues -- nicht geloescht", act->lpath);
-                } else if (clear > 0 && localfs_remove(act->lpath)) {
-                    out->deleted++;
+                } else if (clear > 0 && (act->is_dir ? localfs_remove(act->lpath)
+                                                     : localfs_trash(act->lpath, 0))) {
+                    out->deleted++;   /* a file goes to the trash if there is one */
+                } else if (clear > 0 && !act->is_dir && localfs_trash_active()) {
+                    act->failed = 1; out->errors++;
+                    ui_notify(UI_WARN, "%s: Papierkorb nicht moeglich -- nicht geloescht", act->lpath);
+                    ac_log_printf("sync: Papierkorb fehlgeschlagen: %s\n", act->lpath);
                 } else {
                     act->failed = 1; out->errors++;
                     ac_log_printf("sync: Loeschen (lokal) fehlgeschlagen: %s\n", act->lpath);

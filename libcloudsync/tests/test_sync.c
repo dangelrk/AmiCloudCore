@@ -1044,6 +1044,167 @@ static void t_json_locale(void)
     setlocale(LC_ALL, "C");
 }
 
+/* ------------------------------------------------------------------ */
+/* Phase 6: local trash (localfs_set_trash_hook)                        */
+/* ------------------------------------------------------------------ */
+static char g_trash_dir[700];
+static int  g_trash_calls, g_trash_dir_calls, g_trash_fail;
+static char g_trash_last[1024];
+
+/* moves path into g_trash_dir (like QFile::moveToTrash) */
+static int test_trash(const char *path, int is_dir)
+{
+    char dst[1024];
+    const char *name = strrchr(path, '/');
+    g_trash_calls++;
+    if (is_dir) g_trash_dir_calls++;
+    snprintf(g_trash_last, sizeof(g_trash_last), "%s", path);
+    if (g_trash_fail) return 0;
+    snprintf(dst, sizeof(dst), "%s/%d-%s", g_trash_dir, g_trash_calls, name ? name + 1 : path);
+    return rename(path, dst) == 0;
+}
+
+static void trash_on(Env *e)
+{
+    snprintf(g_trash_dir, sizeof(g_trash_dir), "%s/trash", e->base);
+    localfs_mkdir_p(g_trash_dir);
+    g_trash_calls = g_trash_dir_calls = g_trash_fail = 0;
+    g_trash_last[0] = '\0';
+    localfs_set_trash_hook(test_trash);
+}
+
+static int trashed(const char *name_in_trash, const char *content)
+{
+    char p[1200], buf[256];
+    FILE *fp;
+    size_t n;
+    snprintf(p, sizeof(p), "%s/%s", g_trash_dir, name_in_trash);
+    if (!(fp = fopen(p, "rb"))) return 0;
+    n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[n] = '\0';
+    return strcmp(buf, content) == 0;
+}
+
+/* a file deleted on the server goes to the trash, not away */
+static void t_trash_file(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "alpha", T0);
+    lw(&e, "b.txt", "beta", T0);
+    run(&e);
+    trash_on(&e);
+    fake_remove(&e.f, rp(&e, "a.txt"));
+    run(&e);
+    localfs_set_trash_hook(NULL);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK_EQ(e.s.deleted, 1);
+    CHECK_EQ(g_trash_calls, 1);
+    CHECK(!lexists(&e, "a.txt"));
+    CHECK(trashed("1-a.txt", "alpha"));
+    CHECK(lhas(&e, "b.txt", "beta"));
+    check_idle(&e);
+    env_free(&e);
+}
+
+/* a whole folder deleted on the server goes to the trash as ONE unit */
+static void t_trash_dir_unit(FakeKind k)
+{
+    Env e; env_init(&e, k);
+    lw(&e, "d/a.txt", "a", T0);
+    lw(&e, "d/e/b.txt", "b", T0);
+    lw(&e, "keep.txt", "k", T0);
+    run(&e); run(&e);
+    lw(&e, "d/.DS_Store", "finder", T0);   /* never synced, goes along */
+    trash_on(&e);
+    fake_remove(&e.f, rp(&e, "d"));
+    run(&e);
+    localfs_set_trash_hook(NULL);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK_EQ(e.s.deleted, 4);
+    CHECK_EQ(g_trash_calls, 1);
+    CHECK_EQ(g_trash_dir_calls, 1);
+    CHECK(!lexists(&e, "d"));
+    CHECK(trashed("1-d/a.txt", "a"));
+    CHECK(trashed("1-d/e/b.txt", "b"));
+    CHECK(lhas(&e, "keep.txt", "k"));
+    CHECK(!baseline_has(&e, "d/a.txt"));
+    check_idle(&e);
+    env_free(&e);
+}
+static void t_trash_dir_unit_ac(void)  { t_trash_dir_unit(FAKE_AMICLOUD); }
+static void t_trash_dir_unit_dav(void) { t_trash_dir_unit(FAKE_WEBDAV); }
+
+/* the trash fails: nothing is deleted, the error is reported, the next
+ * run tries again */
+static void t_trash_fails(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "a.txt", "alpha", T0);
+    lw(&e, "d/x.txt", "x", T0);
+    run(&e);
+    trash_on(&e);
+    g_trash_fail = 1;
+    fake_remove(&e.f, rp(&e, "a.txt"));
+    fake_remove(&e.f, rp(&e, "d"));
+    run(&e);
+    CHECK_EQ(e.s.deleted, 0);
+    CHECK(e.s.errors >= 2);
+    CHECK(lhas(&e, "a.txt", "alpha"));
+    CHECK(lhas(&e, "d/x.txt", "x"));
+    CHECK(fake_find(&e.f, rp(&e, "a.txt")) == NULL);   /* not uploaded again */
+    g_trash_fail = 0;
+    run(&e);
+    localfs_set_trash_hook(NULL);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(!lexists(&e, "a.txt"));
+    CHECK(!lexists(&e, "d"));
+    env_free(&e);
+}
+
+/* a folder deleted on the server that got a new local file: the folder
+ * stays (S5), only the known file goes to the trash, the new one is
+ * uploaded */
+static void t_trash_dir_survivor(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "d/x.txt", "x", T0);
+    run(&e);
+    trash_on(&e);
+    fake_remove(&e.f, rp(&e, "d"));
+    lw(&e, "d/new.txt", "new", T0 + 50);
+    run(&e);
+    localfs_set_trash_hook(NULL);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK_EQ(g_trash_dir_calls, 0);
+    CHECK_EQ(g_trash_calls, 1);
+    CHECK(trashed("1-x.txt", "x"));
+    CHECK(lhas(&e, "d/new.txt", "new"));
+    CHECK(fake_has(&e.f, rp(&e, "d/new.txt"), "new"));
+    env_free(&e);
+}
+
+/* a folder deleted on the server whose file was edited locally: the
+ * edit wins (it goes back up), only the unchanged file goes to the trash,
+ * the folder is not moved as a unit */
+static void t_trash_dir_edited(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "d/x.txt", "x", T0);
+    lw(&e, "d/y.txt", "y", T0);
+    run(&e);
+    trash_on(&e);
+    fake_remove(&e.f, rp(&e, "d"));
+    lw(&e, "d/y.txt", "y edited", T0 + 99);
+    run(&e);
+    localfs_set_trash_hook(NULL);
+    CHECK(lhas(&e, "d/y.txt", "y edited"));
+    CHECK(fake_has(&e.f, rp(&e, "d/y.txt"), "y edited"));
+    CHECK(trashed("1-x.txt", "x"));
+    CHECK_EQ(g_trash_dir_calls, 0);
+    env_free(&e);
+}
+
 /* same scenario on AmiCloud: the server refuses the non-empty delete,
  * nothing is lost (pins today's behaviour, not a RISK test) */
 static void t_ac_dir_delete_keeps_new_file(void)
@@ -2133,6 +2294,12 @@ static const Test tests[] = {
     { "S5: neue lokale Datei in entfernt geloeschtem Ordner (WebDAV)",   t_s5_local_dav, NULL },
     { "S13: feste Ausschlussliste",                  t_exclusions, NULL },
     { "JSON unabhaengig vom Locale",                 t_json_locale, NULL },
+    { "Papierkorb: Datei",                           t_trash_file, NULL },
+    { "Papierkorb: Ordner als Einheit (AmiCloud)",   t_trash_dir_unit_ac, NULL },
+    { "Papierkorb: Ordner als Einheit (WebDAV)",     t_trash_dir_unit_dav, NULL },
+    { "Papierkorb: Fehler loescht nichts",           t_trash_fails, NULL },
+    { "Papierkorb: Ordner mit neuer Datei bleibt",   t_trash_dir_survivor, NULL },
+    { "Papierkorb: Ordner mit geaenderter Datei",    t_trash_dir_edited, NULL },
     { "Auswahl: Ordner ausgeschlossen (AmiCloud)",   t_sel_basic_ac, NULL },
     { "Auswahl: Ordner ausgeschlossen (WebDAV)",     t_sel_basic_dav, NULL },
     { "Auswahl: spaeter ausgeschlossen (AmiCloud)",  t_sel_exclude_later_ac, NULL },

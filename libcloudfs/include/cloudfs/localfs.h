@@ -136,4 +136,15 @@ int localfs_utime(const char *path, long mtime_epoch);
  * 07_Sync_Metadaten.md). Returns 1 on success. */
 int localfs_remove(const char *path);
 
+/* Local trash (desktop clients, plan section 5): sync's deletions of
+ * local files and whole directories go through localfs_trash(). Without
+ * a hook (AmigaOS, CLI) that is localfs_remove() -- a directory must then
+ * be empty. With a hook (Qt: QFile::moveToTrash) the file or the whole
+ * directory tree is moved to the trash as one unit. The hook returns 1 on
+ * success; on failure nothing may have been deleted. NULL removes it. */
+typedef int (*LocalTrashFn)(const char *path, int is_dir);
+void localfs_set_trash_hook(LocalTrashFn fn);
+int  localfs_trash_active(void);
+int  localfs_trash(const char *path, int is_dir);
+
 #endif /* LOCALFS_H */
