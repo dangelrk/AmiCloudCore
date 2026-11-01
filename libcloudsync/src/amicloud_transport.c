@@ -106,6 +106,32 @@ static int amicloud_global_rev(SyncTransport *t, long *global_out)
 #define CHANGES_PAGE 1000
 #endif
 
+/* The server answers with absolute paths; the kernel compares them with
+ * remote_root as the caller wrote it ("texte", "" or "/texte", relative
+ * to basepath). Rewrites path into that form: root + rest. 0 if path is
+ * not below the root (left as it is). */
+static size_t strip_slashes(const char *s)
+{
+    size_t l = strlen(s);
+    while (l > 0 && s[l - 1] == '/') l--;
+    return l;
+}
+
+static int to_caller_path(const AcConfig *cfg, const char *remote_root, const char *path,
+                          char *out, size_t sz)
+{
+    char abs[AC_MAX_PATH];
+    size_t al, rl;
+    cmd_resolve_path(cfg, remote_root, abs, sizeof(abs));
+    al = strip_slashes(abs);
+    rl = strip_slashes(remote_root);
+    if (strncmp(path, abs, al) != 0 || (path[al] != '/' && path[al] != '\0')) return 0;
+    if (rl + strlen(path + al) + 1 > sz) return 0;
+    memcpy(out, remote_root, rl);
+    strcpy(out + rl, path + al);
+    return 1;
+}
+
 static int amicloud_changes(SyncTransport *t, const char *remote_root, long since,
                             SyncRemoteChange **out, int *out_n, long *next, int *has_more)
 {
@@ -121,13 +147,17 @@ static int amicloud_changes(SyncTransport *t, const char *remote_root, long sinc
     if (rc != AC_CHANGES_OK) return SYNC_CHANGES_ERROR;
     if (n == 0) { cmd_changes_free(ch); return SYNC_CHANGES_OK; }
 
-    for (i = 0; i < n; i++) strsz += strlen(ch[i].path) + 1;
+    /* worst case per path: the caller's root form replaces the absolute one */
+    for (i = 0; i < n; i++) strsz += strlen(ch[i].path) + strlen(remote_root) + 2;
     arr = (SyncRemoteChange *)calloc(1, sizeof(SyncRemoteChange) * (size_t)n + strsz);
     if (!arr) { cmd_changes_free(ch); return SYNC_CHANGES_ERROR; }
     strs = (char *)(arr + n);
     for (i = 0; i < n; i++) {
-        size_t pl = strlen(ch[i].path) + 1;
-        memcpy(strs, ch[i].path, pl);
+        char cp[AC_MAX_PATH];
+        const char *src = to_caller_path(t->cfg, remote_root, ch[i].path, cp, sizeof(cp))
+                          ? cp : ch[i].path;
+        size_t pl = strlen(src) + 1;
+        memcpy(strs, src, pl);
         arr[i].path       = strs;
         strs += pl;
         arr[i].is_dir     = ch[i].is_dir;

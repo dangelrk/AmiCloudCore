@@ -255,9 +255,12 @@ static int is_root_path(const char *path, const char *remote_root)
 }
 
 /* applies one change to the remote mirror rs: 1 = done, 0 = out of
- * memory, 2 = the remote root itself is gone (renamed or deleted) -- the
+ * memory, 3 = done, it was a deletion, 2 = the remote root itself is
+ * gone (renamed or deleted) -- the
  * delta must not be used, S4: a full listing then fails and stops the
  * run instead of every local file looking deleted on the server */
+static int remote_root_exists(SyncTransport *t, const char *remote_root);
+
 static int apply_change(SyncState *rs, const SyncRemoteChange *c, const char *remote_root,
                         const SyncOptions *o)
 {
@@ -269,9 +272,11 @@ static int apply_change(SyncState *rs, const SyncRemoteChange *c, const char *re
     if (!rel || rel_has_excluded_name(rel) || sync_path_excluded(o->excludes, o->n_excludes, rel))
         return 1;
     if (c->deleted) {
+        const SyncStateEntry *gone = syncstate_find(rs, rel);
+        int maybe_dir = !gone || gone->is_dir || c->is_dir;
         syncstate_remove(rs, rel);
-        remove_below(rs, rel);
-        return 1;
+        if (maybe_dir) remove_below(rs, rel);   /* a file has nothing below it */
+        return 3;
     }
     /* its parent directories are there too (the server has rows for
      * them; this only guards against a hole) */
@@ -308,7 +313,7 @@ static int index_remote_from_delta(SyncTransport *t, const char *remote_root,
 {
     SyncState rs;
     long since = base->global_revision, next = 0;
-    int more = 1, pages = 0, i;
+    int more = 1, pages = 0, i, deletions = 0;
 
     if (!syncstate_copy(&rs, base)) return -1;
     while (more) {
@@ -331,6 +336,7 @@ static int index_remote_from_delta(SyncTransport *t, const char *remote_root,
         }
         for (i = 0; i < n; i++) {
             int r = apply_change(&rs, &ch[i], remote_root, o);
+            if (r == 3) { deletions++; continue; }
             if (r != 1) {
                 if (r == 2 && verbose)
                     ui_notify(UI_INFO, "Sync: Server-Ordner %s geaendert -- liste alles", remote_root);
@@ -345,6 +351,16 @@ static int index_remote_from_delta(SyncTransport *t, const char *remote_root,
             return 0;
         }
         since = next;
+    }
+    /* S4 once more: a root directory the server never had a row for
+     * (created implicitly by an upload below it) gets no tombstone of its
+     * own when it is deleted or renamed -- only its children do, and every
+     * local file would look deleted. One listing of the root settles it;
+     * if it is gone, the full listing fails and stops the run. */
+    if (deletions && !remote_root_exists(t, remote_root)) {
+        if (verbose) ui_notify(UI_INFO, "Sync: Server-Ordner %s nicht lesbar -- liste alles", remote_root);
+        syncstate_free(&rs);
+        return 0;
     }
     for (i = 0; i < rs.n; i++) {
         const SyncStateEntry *e = &rs.items[i];
@@ -1224,6 +1240,9 @@ static void save_checkpoint(const char *local_root, const SyncState *new_st,
     if (!build_effective_state(&cp, new_st, old_st, acts, 1))
         return;   /* no memory: just no checkpoint */
     cp.global_revision = old_st->global_revision;
+    /* the old selection too: a run cut short after a folder was added to
+     * it must list that folder again, not take the shortcut */
+    memcpy(cp.selection, old_st->selection, sizeof(cp.selection));
     cp.had_conflicts = old_st->had_conflicts || new_st->had_conflicts;
     syncstate_save(local_root, &cp);
     syncstate_free(&cp);
@@ -1573,6 +1592,36 @@ static int lower_bound_rel(SyncAction **v, int n, const char *key)
     return lo;
 }
 
+static int act_ptr_lpath_cmp(const void *a, const void *b)
+{
+    return strcmp((*(SyncAction *const *)a)->lpath, (*(SyncAction *const *)b)->lpath);
+}
+
+/* 1 if every entry below path on disk (names never synced aside) is one
+ * of the n delete actions in byl (sorted by lpath), with the same type --
+ * together with the count this means: exactly the scanned entries, not
+ * merely as many (one gone, another new during the run) */
+static int local_tree_covered(const char *path, SyncAction **byl, int n)
+{
+    LocalDir *d;
+    LocalDirEntry e;
+    int ok = 1;
+    if (!(d = localfs_opendir(path))) return 0;
+    while (ok && localfs_readdir(d, &e)) {
+        char child[AC_MAX_PATH];
+        SyncAction key, *kp = &key, **hit;
+        if (sync_name_excluded(e.name)) continue;
+        localfs_join(child, sizeof(child), path, e.name);
+        memset(&key, 0, sizeof(key));
+        snprintf(key.lpath, sizeof(key.lpath), "%s", child);
+        hit = (SyncAction **)bsearch(&kp, byl, (size_t)n, sizeof(SyncAction *), act_ptr_lpath_cmp);
+        if (!hit || !(*hit)->is_dir != !e.is_dir) ok = 0;
+        else if (e.is_dir) ok = local_tree_covered(child, byl, n);
+    }
+    localfs_closedir(d);
+    return ok;
+}
+
 static int is_trash_dir_candidate(const SyncAction *a)
 {
     return a->type == SA_DEL_LOCAL && a->is_dir && !a->declined && !a->done;
@@ -1623,6 +1672,16 @@ static void trash_whole_dirs(SyncActions *acts, SyncSummary *out, int *stopped)
         if (!ok) continue;
         ondisk = count_local_tree(d->lpath, nchildren + 1);
         if (ondisk != nchildren) continue;
+        if (nchildren > 0) {
+            SyncAction **byl = (SyncAction **)malloc(sizeof(SyncAction *) * (size_t)nchildren);
+            int covered;
+            if (!byl) continue;   /* no memory: item by item */
+            memcpy(byl, &v[first], sizeof(SyncAction *) * (size_t)nchildren);
+            qsort(byl, (size_t)nchildren, sizeof(SyncAction *), act_ptr_lpath_cmp);
+            covered = local_tree_covered(d->lpath, byl, (int)nchildren);
+            free(byl);
+            if (!covered) continue;
+        }
 
         if (ui_break_pending()) { *stopped = 1; break; }   /* S2 */
         if (localfs_trash(d->lpath, 1)) {

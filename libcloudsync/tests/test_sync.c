@@ -1378,7 +1378,7 @@ static void t_delta_pages(void)
     fake_remove(&e.f, rp(&e, "big"));
     fake_put_data(&e.f, rp(&e, "n3.txt"), "3", T0);
     run(&e);
-    CHECK_EQ(e.f.calls[FOP_LIST], 0);
+    CHECK_EQ(e.f.calls[FOP_LIST], 1);   /* only the root check (deletions in the feed) */
     CHECK(e.f.changes_calls >= 3);
     CHECK(!lexists(&e, "big"));
     CHECK(lhas(&e, "n1.txt", "1") && lhas(&e, "n2.txt", "2") && lhas(&e, "n3.txt", "3"));
@@ -2441,6 +2441,135 @@ static void t_mass_deletion(void)
 /* ------------------------------------------------------------------ */
 typedef struct { const char *name; void (*fn)(void); const char *risk; } Test;
 
+/* ---- Befunde der Pruefung vor 0.3 ------------------------------------ */
+
+/* a root directory without a row of its own on the server (created by an
+ * upload below it) is renamed: the feed has tombstones for its children
+ * only -- the delta must not make every local file look deleted (S4) */
+static void t_delta_implicit_root_renamed(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    int i;
+    lw(&e, "a.txt", "a", T0);
+    lw(&e, "b.txt", "b", T0);
+    lw(&e, "sub/c.txt", "c", T0);
+    run(&e); run(&e);
+    fake_put_data(&e.f, "/r2/a.txt", "a", T0);
+    fake_put_data(&e.f, "/r2/b.txt", "b", T0);
+    fake_put_data(&e.f, "/r2/sub/c.txt", "c", T0);
+    fake_remove(&e.f, "/r");
+    for (i = 0; i < e.f.nlog; i++)   /* no tombstone for the root itself */
+        if (strcmp(e.f.log[i].path, "/r") == 0) {
+            free(e.f.log[i].path);
+            e.f.log[i].path = strdup("/zz");
+        }
+    run(&e);
+    CHECK(e.s.aborted);
+    CHECK_EQ(e.s.deleted, 0);
+    CHECK(lhas(&e, "a.txt", "a"));
+    CHECK(lhas(&e, "sub/c.txt", "c"));
+    env_free(&e);
+}
+
+/* the trash takes a directory as one unit only if it holds exactly the
+ * scanned entries -- not merely as many (one gone, a new one there) */
+static char g_trash_to[1024];
+static int g_trash_n;
+static int trash_by_rename(const char *path, int is_dir)
+{
+    char to[1200];
+    (void)is_dir;
+    snprintf(to, sizeof(to), "%s/%d", g_trash_to, ++g_trash_n);
+    return rename(path, to) == 0;
+}
+static void race_swap_hook(FakeTransport *f, FakeOp op, const char *path, void *ud)
+{
+    Env *e = (Env *)ud;
+    char p[1024];
+    (void)f;
+    if (op != FOP_GET || !strstr(path, "x.txt")) return;
+    lpath(e, "D/s", p, sizeof(p));
+    rmdir(p);
+    lw(e, "D/new.txt", "neu, nie abgeglichen", T0 + 99);
+}
+static void t_trash_dir_same_count_new_file(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    snprintf(g_trash_to, sizeof(g_trash_to), "%s/trash", e.base);
+    localfs_mkdir_p(g_trash_to);
+    lw(&e, "D/f.txt", "f", T0);
+    lmkdir(&e, "D/s");
+    lw(&e, "x.txt", "x", T0);
+    run(&e); run(&e);
+    fake_remove(&e.f, rp(&e, "D"));
+    fake_put_data(&e.f, rp(&e, "x.txt"), "x2", T0 + 5);
+    e.f.hook = race_swap_hook;
+    e.f.hook_ud = &e;
+    localfs_set_trash_hook(trash_by_rename);
+    run(&e);
+    localfs_set_trash_hook(NULL);
+    e.f.hook = NULL;
+    CHECK(lhas(&e, "D/new.txt", "neu, nie abgeglichen"));
+    CHECK(!lexists(&e, "D/f.txt"));   /* item by item: the scanned file goes */
+    env_free(&e);
+}
+
+/* a checkpoint written while a folder is taken back into the selection
+ * keeps the OLD selection: after a crash the next run lists again and
+ * fetches the rest instead of taking the shortcut */
+static char g_cp_copy[1100];
+static int g_cp_gets;
+static void copy_state_hook(FakeTransport *f, FakeOp op, const char *path, void *ud)
+{
+    Env *e = (Env *)ud;
+    char cmd[2600], b[1100];
+    (void)f; (void)path;
+    if (op != FOP_GET || ++g_cp_gets != 52) return;
+    lpath(e, ".amicloudsync", b, sizeof(b));
+    snprintf(cmd, sizeof(cmd), "cp '%s' '%s'", b, g_cp_copy);
+    if (system(cmd)) {}
+}
+static void t_checkpoint_keeps_old_selection(void)
+{
+    static const char *const ex[] = { "sel" };
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    int i, have = 0;
+    char rel[64], b[1100], cmd[2600];
+    SyncState st;
+    lw(&e, "keep.txt", "k", T0);
+    for (i = 0; i < 120; i++) {
+        snprintf(rel, sizeof(rel), "sel/f%03d.txt", i);
+        fake_put_data(&e.f, rp(&e, rel), rel, T0);
+    }
+    set_excludes(ex, 1);
+    run(&e); run(&e);
+    set_excludes(NULL, 0);
+    snprintf(g_cp_copy, sizeof(g_cp_copy), "%s/cp.json", e.base);
+    g_cp_gets = 0;
+    e.f.hook = copy_state_hook;
+    e.f.hook_ud = &e;
+    run(&e);   /* takes sel back in; a checkpoint is written on the way */
+    e.f.hook = NULL;
+    CHECK(g_cp_gets >= 52);
+    /* "crash" right after the checkpoint */
+    lpath(&e, ".amicloudsync", b, sizeof(b));
+    snprintf(cmd, sizeof(cmd), "cp '%s' '%s'", g_cp_copy, b);
+    if (system(cmd)) {}
+    syncstate_load(e.local, &st);
+    for (i = 0; i < 120; i++) {
+        snprintf(rel, sizeof(rel), "sel/f%03d.txt", i);
+        if (!syncstate_find(&st, rel)) lrm(&e, rel);
+    }
+    syncstate_free(&st);
+    run(&e);
+    for (i = 0; i < 120; i++) {
+        snprintf(rel, sizeof(rel), "sel/f%03d.txt", i);
+        have += lexists(&e, rel);
+    }
+    CHECK_EQ(have, 120);
+    env_free(&e);
+}
+
 static const Test tests[] = {
     { "erster Abgleich laedt hoch (AmiCloud)",       t_first_upload_ac, NULL },
     { "erster Abgleich laedt hoch (WebDAV)",         t_first_upload_dav, NULL },
@@ -2562,6 +2691,9 @@ static const Test tests[] = {
     { "S8: neue Datei laesst fremde Neuanlage",         t_create_only, NULL },
     { "S8: WebDAV If-Match",                            t_dav_if_match, NULL },
     { "S10: Stand traegt Server-Revision nach Upload",  t_put_result, NULL },
+    { "Delta: Wurzel ohne eigene Zeile umbenannt (S4)", t_delta_implicit_root_renamed, NULL },
+    { "Papierkorb: gleiche Zahl, andere Eintraege",     t_trash_dir_same_count_new_file, NULL },
+    { "Zwischenstand behaelt alte Auswahl",             t_checkpoint_keeps_old_selection, NULL },
 };
 
 int main(int argc, char **argv)
