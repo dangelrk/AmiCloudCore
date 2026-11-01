@@ -38,6 +38,7 @@ PREFIX    ?= /usr/local
 BUILD_DIR ?= build
 DIST_DIR   = $(BUILD_DIR)/dist/$(PROJECT)
 RELEASE_DIR = $(BUILD_DIR)/release
+AMINET_DIR  = $(RELEASE_DIR)/aminet-$(VERSION)
 VERSION_H  = core/libcloudcore/include/cloudcore/version.h
 VERSION   ?= $(shell sed -n 's/^\#define AC_VERSION *"\([^"]*\)".*/\1/p' $(VERSION_H))
 # Build date = the day "make" runs (see version.h). Exported, so every
@@ -69,6 +70,7 @@ help:
 	@echo "  make amiga                AmigaOS-Programme per vbcc-Cross-Compiler (bin/amiga/)"
 	@echo "  make dist-amiga           Amiga-Installationsschublade unter $(DIST_DIR)/"
 	@echo "  make release              ... dazu $(RELEASE_DIR)/$(PROJECT)-$(VERSION).lha + .readme"
+	@echo "                            (GitHub) und $(AMINET_DIR)/$(PROJECT).lha + .readme (Aminet)"
 	@echo "  make server-release       Server-Paket $(RELEASE_DIR)/$(PROJECT)-Server-$(VERSION).tar.gz"
 	@echo "  make server-test          Server-Paket bauen, nach INSTALL.md installieren, testen"
 	@echo "  make build-amiga-script   Build-Amiga (natives Amiga-Buildskript) neu erzeugen"
@@ -138,8 +140,12 @@ dist-amiga: amiga
 	$(PYTHON) core/tools/lhapack.py $(BUILD_DIR)/$(PROJECT).lha $(BUILD_DIR)/dist \
 	    $(PROJECT) $(if $(wildcard install/amiga/icons.spec),$(PROJECT).info)
 
-# Release files as uploaded to Aminet/GitHub: the archive with version in
-# its name plus the Aminet readme (install/amiga/aminet.readme, Latin-1).
+# Release files: for GitHub the archive with version in its name plus the
+# Aminet readme (install/amiga/aminet.readme, Latin-1); for Aminet the
+# same two files without version (Aminet wants one name for all versions,
+# the version only in the readme) in $(AMINET_DIR)/. The readme is checked
+# against Aminet's rules: Short:/Uploader:/Type:/Architecture: present,
+# Short: at most 40 characters, lines at most 78, no CR.
 # The archive is checked with lha (Lhasa) when it is installed.
 # Every Amiga program is rebuilt, so all of them carry today's date in
 # their $VER string -- the day the release is built and tagged.
@@ -154,6 +160,12 @@ release:
 	    sed 's/@VERSION@/$(VERSION)/g' install/amiga/aminet.readme > $(RELEASE_DIR)/$(PROJECT)-$(VERSION).readme; fi
 	@if command -v lha >/dev/null 2>&1; then \
 	    lha t $(RELEASE_DIR)/$(PROJECT)-$(VERSION).lha >/dev/null && echo "lha t: Archiv in Ordnung"; fi
+	@if [ -f $(RELEASE_DIR)/$(PROJECT)-$(VERSION).readme ]; then \
+	    awk -f core/tools/aminet-readme-check.awk $(RELEASE_DIR)/$(PROJECT)-$(VERSION).readme && \
+	    rm -rf $(AMINET_DIR) && mkdir -p $(AMINET_DIR) && \
+	    cp $(RELEASE_DIR)/$(PROJECT)-$(VERSION).lha $(AMINET_DIR)/$(PROJECT).lha && \
+	    cp $(RELEASE_DIR)/$(PROJECT)-$(VERSION).readme $(AMINET_DIR)/$(PROJECT).readme && \
+	    ls -l $(AMINET_DIR)/$(PROJECT).*; fi
 	@ls -l $(RELEASE_DIR)/$(PROJECT)-$(VERSION).*
 
 # Server package (projects with a server/ folder): server files, LICENSE,

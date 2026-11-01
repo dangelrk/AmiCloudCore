@@ -217,15 +217,39 @@ Commits und Push nur, wenn der Nutzer es ausdrücklich will.
 
 ## 6. Aminet (noch nie gemacht)
 
-- `install/amiga/aminet.readme`: `@VERSION@` setzt `make release` ein.
-  `Uploader:` trägt die Adresse amitools@planet-rk.de.
-- Für den ersten Upload steht kein `Replaces:` in den Readmes. Ab dem
-  zweiten Upload wieder eintragen (`Replaces: <Typ>/<Projekt>.lha`, z. B.
-  `comm/net/AmiCloud.lha`).
+Regeln: wiki.aminet.net/Uploading_instructions und
+wiki.aminet.net/The_Readme_file.
+
+- **Dateien:** `make release` legt neben den GitHub-Dateien mit Version
+  (`<Projekt>-<version>.lha/.readme`) einen Aminet-Satz ohne Version an:
+  `build/release/aminet-<version>/<Projekt>.lha` und `<Projekt>.readme`.
+  Aminet will einen Namen für alle Versionen; die Version steht nur im
+  Readme. Ein Update geht unter demselben Namen hoch, dafür ist kein
+  `Replaces:` nötig.
+- **Readme** (`install/amiga/aminet.readme`, `@VERSION@` setzt
+  `make release` ein). `make release` prüft es mit
+  `tools/aminet-readme-check.awk`:
+  - `Short:` als erste Zeile, höchstens 40 Zeichen, ohne Version und
+    ohne Plattform,
+  - `Uploader:`, `Type:` und `Architecture:` vorhanden,
+  - `Distribution:` nur `Aminet` oder `NoCD`,
+  - Zeilen höchstens 78 Zeichen, nur LF.
+- `Uploader:` im Format `amitools@planet-rk.de (Ronny Krueger)`.
+- `Requires:` nennt die Aminet-Archive der Pflichtbibliotheken:
+  `util/libs/AmiSSL-v5-OS3.lha`, `util/libs/mui38usr.lha` (nur wo MUI
+  gebraucht wird). TCP/IP-Stack, 68020 und die optionalen
+  `codesets.library` (`util/libs/codesets-6.22.lha`) und `xvs.library`
+  (`util/virus/xvslibrary.lha`) stehen im Abschnitt Requirements.
+  AmiVCS braucht weder codesets noch xvs.
 - Die Quellen sind privat. Die Readmes verweisen deshalb nicht auf GitHub.
   Der Server liegt in AmiCloud und AmiVCS als Schublade `Server` bei.
-- Nur `.lha` und `.readme` hochladen (gleicher Basisname). AmiSuite gibt es
-  nur auf GitHub, nicht auf Aminet.
+- Nur `.lha` und `.readme` hochladen. AmiSuite gibt es nur auf GitHub.
+- **Hochladen** per FTP (das Web-Formular ist derzeit außer Betrieb):
+  ```sh
+  cd build/release/aminet-<version>
+  curl -T <Projekt>.lha    --user anonymous:amitools@planet-rk.de ftp://main.aminet.net/new/
+  curl -T <Projekt>.readme --user anonymous:amitools@planet-rk.de ftp://main.aminet.net/new/
+  ```
 
 ## 7. Noch offen bzw. ungetestet
 
