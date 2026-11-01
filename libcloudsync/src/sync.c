@@ -135,7 +135,7 @@ static int sync_entry_cmp(const void *a, const void *b)
  * unlisted subtree would look deleted remotely and its local copy would
  * be deleted (S1). */
 static int index_remote_tree_sync(SyncTransport *t, const char *remote_root,
-                                  const char *rel_prefix, SyncIndex *idx,
+                                  const char *rel_prefix, const SyncOptions *o, SyncIndex *idx,
                                   char *errpath, size_t errsz)
 {
     SyncRemoteEntry *entries;
@@ -162,10 +162,11 @@ static int index_remote_tree_sync(SyncTransport *t, const char *remote_root,
             strncpy(relchild, entries[i].name, sizeof(relchild) - 1);
             relchild[sizeof(relchild) - 1] = '\0';
         }
+        if (sync_path_excluded(o->excludes, o->n_excludes, relchild)) continue;   /* selection */
         if (!index_add(idx, relchild, entries[i].is_dir, entries[i].size, entries[i].mtime,
                        entries[i].md5, entries[i].token, entries[i].revision, entries[i].id) ||
             (entries[i].is_dir &&
-             !index_remote_tree_sync(t, remote_root, relchild, idx, errpath, errsz))) {
+             !index_remote_tree_sync(t, remote_root, relchild, o, idx, errpath, errsz))) {
             if (!errpath[0]) snprintf(errpath, errsz, "%s (kein Speicher)", remote_path);
             free(entries);
             return 0;
@@ -215,6 +216,67 @@ int sync_name_excluded(const char *name)
     for (c = (const unsigned char *)name; *c; c++)
         if (*c < 0x20 || *c == 0x7f || *c == '\\') return 1;
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Selective sync (SyncOptions.excludes)                                */
+/* ------------------------------------------------------------------ */
+int sync_path_excluded(const char *const *ex, int n, const char *relpath)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        size_t l;
+        if (!ex[i] || !ex[i][0]) continue;
+        l = strlen(ex[i]);
+        if (strncmp(relpath, ex[i], l) == 0 && (relpath[l] == '\0' || relpath[l] == '/'))
+            return 1;
+    }
+    return 0;
+}
+
+static int str_ptr_cmp(const void *a, const void *b);
+
+/* The stamp of an exclusion list: MD5 over the sorted paths, "" for none.
+ * Order and duplicates do not matter. */
+static void selection_stamp(const SyncOptions *o, char out[33])
+{
+    const char **v;
+    Md5Ctx ctx;
+    unsigned char dig[16];
+    int i, n = 0;
+    out[0] = '\0';
+    if (!o->excludes || o->n_excludes <= 0) return;
+    v = (const char **)malloc(sizeof(char *) * (size_t)o->n_excludes);
+    if (!v) { strcpy(out, "?"); return; }   /* differs from every real stamp: full scan */
+    for (i = 0; i < o->n_excludes; i++)
+        if (o->excludes[i] && o->excludes[i][0]) v[n++] = o->excludes[i];
+    if (n) {
+        qsort(v, (size_t)n, sizeof(char *), str_ptr_cmp);
+        md5_init(&ctx);
+        for (i = 0; i < n; i++) {
+            if (i > 0 && strcmp(v[i], v[i - 1]) == 0) continue;
+            md5_update(&ctx, (const unsigned char *)v[i], strlen(v[i]));
+            md5_update(&ctx, (const unsigned char *)"\n", 1);
+        }
+        md5_final(&ctx, dig);
+        md5_to_hex(dig, out);
+    }
+    free(v);
+}
+
+/* Drops the baseline entries of excluded paths (kept order). */
+static void drop_excluded(SyncState *st, const SyncOptions *o)
+{
+    int i, w = 0;
+    if (!o->excludes || o->n_excludes <= 0) return;
+    for (i = 0; i < st->n; i++) {
+        if (sync_path_excluded(o->excludes, o->n_excludes, st->items[i].path)) {
+            free(st->items[i].path);
+            continue;
+        }
+        st->items[w++] = st->items[i];
+    }
+    st->n = w;
 }
 
 /* ------------------------------------------------------------------ */
@@ -486,8 +548,9 @@ static const char *namemap_find(const NameMap *m, const char *lrel)
  * failing local path in errpath -- an unreadable subtree would otherwise
  * look deleted locally and be deleted on the server (S1). */
 static int index_local_tree_sync(const char *local_root, const char *rel_prefix,
-                                 const char *lrel_prefix, SyncIndex *idx, SyncState *baseline,
-                                 const NameMap *map, char *errpath, size_t errsz)
+                                 const char *lrel_prefix, const SyncOptions *o, SyncIndex *idx,
+                                 SyncState *baseline, const NameMap *map,
+                                 char *errpath, size_t errsz)
 {
     LocalDir *d;
     LocalDirEntry e;
@@ -531,6 +594,8 @@ static int index_local_tree_sync(const char *local_root, const char *rel_prefix,
             else
                 snprintf(relchild, sizeof(relchild), "%s", uname);
         }
+        /* selection: an excluded folder stays as it is, unread */
+        if (sync_path_excluded(o->excludes, o->n_excludes, relchild)) continue;
 
         md5hex[0] = '\0';
         if (!e.is_dir) {
@@ -549,7 +614,7 @@ static int index_local_tree_sync(const char *local_root, const char *rel_prefix,
             (strcmp(relchild, lrelchild) != 0 &&
              !(idx->items[idx->n - 1].lrel = sync_dupstr(lrelchild))) ||
             (e.is_dir &&
-             !index_local_tree_sync(local_root, relchild, lrelchild, idx, baseline, map,
+             !index_local_tree_sync(local_root, relchild, lrelchild, o, idx, baseline, map,
                                     errpath, errsz))) {
             if (!errpath[0]) snprintf(errpath, errsz, "%s (kein Speicher)", local_path);
             localfs_closedir(d);
@@ -982,6 +1047,7 @@ static int build_effective_state(SyncState *out, const SyncState *new_st,
     free(pend);
     out->global_revision = new_st->global_revision;
     out->had_conflicts   = new_st->had_conflicts;
+    memcpy(out->selection, new_st->selection, sizeof(out->selection));
     return 1;
 }
 
@@ -1352,6 +1418,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     long        cp_time;
     int         cp_every = SYNC_CHECKPOINT_ACTIONS;
     int         run_name_max = 255;
+    int         selection_changed;
 
     if (!opts) { sync_options_init(&defaults); opts = &defaults; }
     dry_run = opts->dry_run;
@@ -1401,6 +1468,14 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     }
     /* old_st is sorted by path already (syncstate.h, S12) */
 
+    /* Selective sync: excluded paths leave the baseline (a path taken
+     * back in later then merges like a first sync); another list than
+     * last time means the baseline is no mirror of the selected remote
+     * tree, so no fast path this run. */
+    selection_stamp(opts, new_st.selection);
+    drop_excluded(&old_st, opts);
+    selection_changed = strcmp(old_st.selection, new_st.selection) != 0;
+
     /* Both sides are created if missing -- never in a dry run. S4: with a
      * baseline the remote root is expected to exist; if it is gone (e.g.
      * renamed on the server), recreating it empty would make every local
@@ -1441,6 +1516,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
      * the conflict by trusting stale data -- see report_conflict(). */
     status_ok = t->global_rev(t, &server_global);
     use_baseline_as_remote = status_ok && !old_st.had_conflicts && old_st.n > 0 &&
+                            !selection_changed &&
                             (server_global == old_st.global_revision);
 
     /* S1: both trees must be scanned completely, or nothing happens at
@@ -1451,7 +1527,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     else if (dry_run && old_st.n == 0 && !remote_root_exists(t, remote_root))
         scan_ok = 1;   /* preview of a first sync: the root comes later */
     else
-        scan_ok = index_remote_tree_sync(t, remote_root, "", &ridx, errpath, sizeof(errpath));
+        scan_ok = index_remote_tree_sync(t, remote_root, "", opts, &ridx, errpath, sizeof(errpath));
     /* Phase 4: map lossy local names back to their server names */
     if (scan_ok && !namemap_build(&namemap, &ridx, &old_st, &case_skips)) {
         ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: kein Speicher");
@@ -1460,7 +1536,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
         goto out_free;
     }
     if (scan_ok)
-        scan_ok = index_local_tree_sync(local_root, "", "", &lidx, &old_st, &namemap,
+        scan_ok = index_local_tree_sync(local_root, "", "", opts, &lidx, &old_st, &namemap,
                                         errpath, sizeof(errpath));
     if (!scan_ok) {
         ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: %s nicht lesbar",

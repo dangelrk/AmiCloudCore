@@ -32,6 +32,7 @@ static void state_init(SyncState *st)
     st->global_revision = 0;
     st->had_conflicts = 0;
     st->identity = NULL;
+    st->selection[0] = '\0';
 }
 
 int syncstate_set_identity(SyncState *st, const char *id)
@@ -73,6 +74,10 @@ int syncstate_load(const char *local_root, SyncState *st)
 
     st->global_revision = AC_DTOL(json_object_get_number(root, "global_revision"));
     st->had_conflicts   = (json_object_get_boolean(root, "had_conflicts") == 1);
+    if (json_object_get_string(root, "selection")) {
+        strncpy(st->selection, json_object_get_string(root, "selection"), sizeof(st->selection) - 1);
+        st->selection[sizeof(st->selection) - 1] = '\0';
+    }
 
     entries = json_object_get_array(root, "entries");
     n = entries ? (int)json_array_get_count(entries) : 0;
@@ -123,6 +128,7 @@ int syncstate_save(const char *local_root, const SyncState *st)
     if (st->identity) json_object_set_string(root, "identity", st->identity);
     json_object_set_number (root, "global_revision", (double)st->global_revision);
     json_object_set_boolean(root, "had_conflicts", st->had_conflicts);
+    if (st->selection[0]) json_object_set_string(root, "selection", st->selection);
 
     entries_val = json_value_init_array();
     if (!entries_val) { json_value_free(root_val); return 0; }
@@ -229,6 +235,7 @@ int syncstate_copy(SyncState *dst, const SyncState *src)
     }
     dst->global_revision = src->global_revision;
     dst->had_conflicts = src->had_conflicts;
+    memcpy(dst->selection, src->selection, sizeof(dst->selection));
     if (!syncstate_set_identity(dst, src->identity)) { syncstate_free(dst); return 0; }
     return 1;
 }
@@ -252,4 +259,5 @@ void syncstate_free(SyncState *st)
     st->global_revision = 0;
     free(st->identity);
     st->identity = NULL;
+    st->selection[0] = '\0';
 }

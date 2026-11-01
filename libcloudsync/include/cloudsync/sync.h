@@ -78,6 +78,16 @@ typedef struct {
      * 0 = defaults (20 files, 50 %); force_deletes = 1 never asks. */
     int del_min, del_pct;
     int force_deletes;
+    /* Selective sync (AmiCloud Desktop): paths relative to the remote
+     * root (UTF-8, '/'-joined, no leading or trailing '/') that are left
+     * out, each with everything below it. Neither side is touched there --
+     * nothing is transferred or deleted, a local folder of that name stays
+     * as it is -- and their baseline entries are dropped, so taking a path
+     * back in later merges like a first sync (never deletes). A changed
+     * list turns the global_revision fast path off for one run. NULL/0 =
+     * everything. The kernel keeps no pointer after the run. */
+    const char *const *excludes;
+    int n_excludes;
 } SyncOptions;
 
 void sync_options_init(SyncOptions *o);
@@ -87,6 +97,10 @@ void sync_options_init(SyncOptions *o);
  * ~$* (Office locks), *.part, names with a backslash or control
  * characters. Same list on every client. */
 int sync_name_excluded(const char *name);
+
+/* 1 if relpath (relative to the remote root, UTF-8) is one of the n
+ * paths in ex or lies below one (see SyncOptions.excludes). */
+int sync_path_excluded(const char *const *ex, int n, const char *relpath);
 
 /* Reconciles local_root and remote_root through transport t via a 3-way
  * diff against syncstate.h's persistent baseline (see sync.c for the

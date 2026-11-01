@@ -84,6 +84,8 @@ static int  g_name_max;   /* SyncOptions.name_max for the next runs, 0 = probe *
 static int (*g_virus)(const char *, long, char *, size_t);   /* SyncOptions.virus_check */
 static int  g_conflict_skip;   /* SyncOptions.conflict_skip (the pre-0.3 behaviour) */
 static int  g_force_deletes;   /* SyncOptions.force_deletes */
+static const char *const *g_excludes;   /* SyncOptions.excludes (selective sync) */
+static int  g_n_excludes;
 static int  g_envno;
 
 static void rm_rf(const char *path)
@@ -214,6 +216,8 @@ static void run_root(Env *e, const char *remote_root, int dry)
         o.virus_check = g_virus;
         o.conflict_skip = g_conflict_skip;
         o.force_deletes = g_force_deletes;
+        o.excludes = g_excludes;
+        o.n_excludes = g_n_excludes;
         cloudsync_run_ex(&e->f.t, e->local, remote_root, &o, &pr, &e->s);
     }
     fflush(stdout);
@@ -853,6 +857,144 @@ static void t_exclusions(void)
     CHECK(sync_name_excluded(".amicloudsync.tmp"));
     CHECK(!sync_name_excluded("Disk.info"));
     CHECK(!sync_name_excluded("partitur.txt"));
+    env_free(&e);
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 5: selective sync (SyncOptions.excludes)                       */
+/* ------------------------------------------------------------------ */
+
+static void set_excludes(const char *const *ex, int n) { g_excludes = ex; g_n_excludes = n; }
+
+/* an excluded server folder is neither downloaded nor touched, a local
+ * folder of the same name is not uploaded; "B" does not exclude "Bx" */
+static void t_sel_basic(FakeKind k)
+{
+    static const char *const ex[] = { "B" };
+    Env e; env_init(&e, k);
+    fake_put_data(&e.f, rp(&e, "A/a.txt"), "a", T0);
+    fake_put_data(&e.f, rp(&e, "B/b.txt"), "b", T0);
+    fake_put_data(&e.f, rp(&e, "Bx/c.txt"), "c", T0);
+    lw(&e, "B/mine.txt", "mine", T0);
+    set_excludes(ex, 1);
+    run(&e);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK_EQ(e.s.downloaded, 2);
+    CHECK_EQ(e.s.uploaded, 0);
+    CHECK(lhas(&e, "A/a.txt", "a"));
+    CHECK(lhas(&e, "Bx/c.txt", "c"));
+    CHECK(!lexists(&e, "B/b.txt"));
+    CHECK(lhas(&e, "B/mine.txt", "mine"));
+    CHECK(fake_find(&e.f, rp(&e, "B/mine.txt")) == NULL);
+    CHECK(!baseline_has(&e, "B"));
+    CHECK(!baseline_has(&e, "B/b.txt"));
+    check_idle(&e);
+    set_excludes(NULL, 0);
+    env_free(&e);
+}
+static void t_sel_basic_ac(void)  { t_sel_basic(FAKE_AMICLOUD); }
+static void t_sel_basic_dav(void) { t_sel_basic(FAKE_WEBDAV); }
+
+/* excluding a synced folder later deletes nothing on either side, and a
+ * local deletion inside it afterwards does not reach the server */
+static void t_sel_exclude_later(FakeKind k)
+{
+    static const char *const ex[] = { "B" };
+    Env e; env_init(&e, k);
+    fake_put_data(&e.f, rp(&e, "A/a.txt"), "a", T0);
+    fake_put_data(&e.f, rp(&e, "B/b.txt"), "b", T0);
+    run(&e);
+    CHECK(lhas(&e, "B/b.txt", "b"));
+    set_excludes(ex, 1);
+    run(&e);
+    CHECK_EQ(e.s.deleted, 0);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(lhas(&e, "B/b.txt", "b"));
+    CHECK(fake_has(&e.f, rp(&e, "B/b.txt"), "b"));
+    CHECK(!baseline_has(&e, "B/b.txt"));
+    lrm(&e, "B");
+    run(&e);
+    CHECK_EQ(e.s.deleted, 0);
+    CHECK(fake_has(&e.f, rp(&e, "B/b.txt"), "b"));
+    set_excludes(NULL, 0);
+    env_free(&e);
+}
+static void t_sel_exclude_later_ac(void)  { t_sel_exclude_later(FAKE_AMICLOUD); }
+static void t_sel_exclude_later_dav(void) { t_sel_exclude_later(FAKE_WEBDAV); }
+
+/* taking an excluded folder back in fetches it at once, even though the
+ * server's global revision has not moved (the fast path is off for that
+ * run); a copy kept locally with the same content is no conflict */
+static void t_sel_reinclude_ac(void)
+{
+    static const char *const ex[] = { "B" };
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    fake_put_data(&e.f, rp(&e, "A/a.txt"), "a", T0);
+    fake_put_data(&e.f, rp(&e, "B/b.txt"), "b", T0);
+    fake_put_data(&e.f, rp(&e, "C/c.txt"), "c", T0);
+    lw(&e, "C/c.txt", "c", T0);
+    set_excludes(ex, 1);
+    run(&e);
+    check_idle(&e);
+    CHECK(!lexists(&e, "B/b.txt"));
+    set_excludes(NULL, 0);
+    run(&e);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK_EQ(e.s.downloaded, 1);
+    CHECK(lhas(&e, "B/b.txt", "b"));
+    check_idle(&e);
+    /* C excluded, kept locally, then taken back: same content */
+    {
+        static const char *const exc[] = { "C" };
+        set_excludes(exc, 1);
+        run(&e);
+        set_excludes(NULL, 0);
+        run(&e);
+        CHECK_EQ(e.s.conflicts, 0);
+        CHECK_EQ(e.s.copies, 0);
+        CHECK_EQ(e.s.uploaded, 0);
+        CHECK_EQ(e.s.downloaded, 0);
+        CHECK(baseline_has(&e, "C/c.txt"));
+    }
+    env_free(&e);
+}
+
+/* nested: only the subfolder is left out, its parent is synced */
+static void t_sel_nested_ac(void)
+{
+    static const char *const ex[] = { "A/sub", "Z" };
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    fake_put_data(&e.f, rp(&e, "A/a.txt"), "a", T0);
+    fake_put_data(&e.f, rp(&e, "A/sub/s.txt"), "s", T0);
+    fake_put_data(&e.f, rp(&e, "A/subway.txt"), "w", T0);
+    set_excludes(ex, 2);
+    run(&e);
+    CHECK_EQ(e.s.downloaded, 2);
+    CHECK(lhas(&e, "A/a.txt", "a"));
+    CHECK(lhas(&e, "A/subway.txt", "w"));
+    CHECK(!lexists(&e, "A/sub"));
+    CHECK(sync_path_excluded(ex, 2, "A/sub/deep/x"));
+    CHECK(!sync_path_excluded(ex, 2, "A/subway.txt"));
+    CHECK(!sync_path_excluded(ex, 2, "A"));
+    set_excludes(NULL, 0);
+    env_free(&e);
+}
+
+/* a whole folder removed locally whose excluded subfolder is still on the
+ * server: the folder stays on the server, nothing excluded is lost */
+static void t_sel_parent_deleted_ac(void)
+{
+    static const char *const ex[] = { "A/sub" };
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    fake_put_data(&e.f, rp(&e, "A/a.txt"), "a", T0);
+    fake_put_data(&e.f, rp(&e, "A/sub/s.txt"), "s", T0);
+    set_excludes(ex, 1);
+    run(&e);
+    lrm(&e, "A");
+    run(&e);
+    CHECK(fake_has(&e.f, rp(&e, "A/sub/s.txt"), "s"));
+    CHECK(fake_find(&e.f, rp(&e, "A/a.txt")) == NULL);
+    set_excludes(NULL, 0);
     env_free(&e);
 }
 
@@ -1906,6 +2048,13 @@ static const Test tests[] = {
     { "S5: neue lokale Datei in entfernt geloeschtem Ordner (AmiCloud)", t_s5_local_ac, NULL },
     { "S5: neue lokale Datei in entfernt geloeschtem Ordner (WebDAV)",   t_s5_local_dav, NULL },
     { "S13: feste Ausschlussliste",                  t_exclusions, NULL },
+    { "Auswahl: Ordner ausgeschlossen (AmiCloud)",   t_sel_basic_ac, NULL },
+    { "Auswahl: Ordner ausgeschlossen (WebDAV)",     t_sel_basic_dav, NULL },
+    { "Auswahl: spaeter ausgeschlossen (AmiCloud)",  t_sel_exclude_later_ac, NULL },
+    { "Auswahl: spaeter ausgeschlossen (WebDAV)",    t_sel_exclude_later_dav, NULL },
+    { "Auswahl: wieder aufgenommen",                 t_sel_reinclude_ac, NULL },
+    { "Auswahl: Unterordner",                        t_sel_nested_ac, NULL },
+    { "Auswahl: Elternordner lokal geloescht",       t_sel_parent_deleted_ac, NULL },
 
     { "S1: list-Fehler bricht ab (WebDAV)",   r_list_error_deletes_local,     NULL },
     { "S1: list-Fehler bricht ab (AmiCloud)", r_list_error_deletes_local_ac,  NULL },

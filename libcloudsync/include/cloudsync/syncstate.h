@@ -76,6 +76,12 @@ typedef struct {
      * identity must never be used: its entries would make every file of
      * the new pair look deleted (S3). */
     char *identity;
+    /* Stamp of the selective-sync exclusion list this baseline was made
+     * with (sync.c; "" = nothing excluded). Another list switches the
+     * global_revision fast path off for one run: a path taken back in is
+     * in no baseline and would otherwise only come with the next server
+     * change. */
+    char selection[33];
 } SyncState;
 
 /* Loads <local_root>/.amicloudsync. A missing file is not an error -- it
