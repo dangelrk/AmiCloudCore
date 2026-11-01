@@ -107,6 +107,10 @@ Enthält `server/` (ohne `config.php`), `LICENSE`, die Zusatzdateien aus
 in `install/server/README.md` eintragen, ab welcher Version sie nötig ist.
 Werkzeug: `tools/serverpack.py`.
 
+Das Server-Paket steckt außerdem in der Amiga-Schublade unter `Server/`
+(samt `install/amiga/Server/ReadMe`, Latin-1), damit es mit dem
+Aminet-Archiv mitkommt.
+
 `make server-test` (Werkzeug `tools/servertest.py`) prüft zuerst den
 Inhalt: `server/` genau wie im Repo, keine `config.php`, keine macOS-Reste,
 alles root:root, `php -l` ohne Fehler. Dann installiert es das Paket so,
@@ -210,11 +214,13 @@ Commits und Push nur, wenn der Nutzer es ausdrücklich will.
 
 ## 6. Aminet (noch nie gemacht)
 
-- `install/amiga/aminet.readme`: `@VERSION@` setzt `make release` ein. Das
-  Feld `Uploader:` enthält noch **keine E-Mail**. Sie muss vom Autor selbst
-  eingetragen werden, sie wird nicht automatisch weitergegeben.
-- `Replaces:` stimmt erst ab dem zweiten Aminet-Upload. Beim ersten Upload
-  die Zeile entfernen.
+- `install/amiga/aminet.readme`: `@VERSION@` setzt `make release` ein.
+  `Uploader:` trägt die Adresse amitools@planet-rk.de.
+- Für den ersten Upload steht kein `Replaces:` in den Readmes. Ab dem
+  zweiten Upload wieder eintragen (`Replaces: <Typ>/<Projekt>.lha`, z. B.
+  `comm/net/AmiCloud.lha`).
+- Die Quellen sind privat. Die Readmes verweisen deshalb nicht auf GitHub.
+  Der Server liegt in AmiCloud und AmiVCS als Schublade `Server` bei.
 - Nur `.lha` und `.readme` hochladen (gleicher Basisname). AmiSuite gibt es
   nur auf GitHub, nicht auf Aminet.
 

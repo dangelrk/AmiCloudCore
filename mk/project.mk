@@ -16,6 +16,9 @@
 # Optional in install/amiga/ (not copied into the drawer themselves):
 #   icons.spec       Workbench icons for the drawer, see core/tools/mkicon.py
 #   aminet.readme    Aminet readme for "make release"; @VERSION@ is replaced
+#   Server/ReadMe    with SERVER_DOC_HEADING set: the server package (see
+#                    server-release) goes into the drawer's Server/ too,
+#                    so the Aminet archive carries the server as well
 #
 # In the drawer's Install-*, Uninstall-* and ReadMe, dist-amiga replaces
 # @VERSION@ (e.g. 0.1), @DATE@ (build date, dd.mm.yyyy), @VER_MAJOR@ (0) and
@@ -118,11 +121,14 @@ dist-amiga: amiga
 	    f=$${x%%:*}; d=$(DIST_DIR)/$${x#*:}; mkdir -p "$$d" && cp "$$f" "$$d/"; done
 	cp LICENSE $(DIST_DIR)/LICENSE
 	cp core/THIRD-PARTY-NOTICES.txt $(DIST_DIR)/THIRD-PARTY-NOTICES
+	@if [ -n "$(SERVER_DOC_HEADING)" ]; then mkdir -p $(DIST_DIR)/Server && \
+	    $(PYTHON) core/tools/serverpack.py $(PROJECT) $(VERSION) $(DIST_DIR)/Server \
+	        "$(SERVER_DOC_HEADING)" $(SERVER_EXTRA); fi
 	@if ls install/amiga/Install-*.shell >/dev/null 2>&1; then \
 	    cp core/tools/amiga/Install-Datei $(DIST_DIR)/; fi
 	@test -n "$(VERSION)" -a -n "$(DATE)" -a -n "$(VER_REVN)" || \
 	    { echo "Version/Datum nicht gefunden ($(VERSION_H))"; exit 1; }
-	@for f in $(DIST_DIR)/Install-* $(DIST_DIR)/Uninstall-* $(DIST_DIR)/ReadMe; do \
+	@for f in $(DIST_DIR)/Install-* $(DIST_DIR)/Uninstall-* $(DIST_DIR)/ReadMe $(DIST_DIR)/Server/ReadMe; do \
 	    [ -f "$$f" ] || continue; \
 	    LC_ALL=C sed -e 's/@VERSION@/$(VERSION)/g' -e 's/@DATE@/$(DATE)/g' \
 	        -e 's/@VER_MAJOR@/$(VER_MAJOR)/g' -e 's/@VER_REVN@/$(VER_REVN)/g' \
