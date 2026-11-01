@@ -36,6 +36,8 @@
 #include <utime.h>
 #include <fcntl.h>
 #include <time.h>
+#include <locale.h>
+#include "parson.h"
 
 /* ------------------------------------------------------------------ */
 /* Mini test framework                                                 */
@@ -998,6 +1000,50 @@ static void t_sel_parent_deleted_ac(void)
     env_free(&e);
 }
 
+/* A Qt client runs with setlocale(LC_ALL, "") -- under de_DE strtod()
+ * reads "0,1" as one number and every JSON object with a number before
+ * another field failed to parse (found with AmiCloud Desktop, phase 5).
+ * JSON must not depend on the process locale, in both directions. */
+static void t_json_locale(void)
+{
+    static const char *const names[] = { "de_DE.UTF-8", "de_DE.ISO8859-1", "de_DE", "fr_FR.UTF-8" };
+    const char *got = NULL;
+    JSON_Value *v;
+    char *out;
+    size_t i;
+    for (i = 0; i < sizeof(names) / sizeof(names[0]) && !got; i++)
+        got = setlocale(LC_ALL, names[i]);
+    if (!got) SKIP("kein Locale mit Dezimalkomma installiert");
+    v = json_parse_string("{\"a\":0,\"b\":1.5,\"c\":[3,4],\"d\":275401281536}");
+    CHECK(v != NULL);
+    if (v) {
+        JSON_Object *o = json_value_get_object(v);
+        CHECK(json_object_get_number(o, "a") == 0.0);
+        CHECK(json_object_get_number(o, "b") == 1.5);
+        CHECK(json_object_get_number(o, "d") == 275401281536.0);
+        json_value_free(v);
+    }
+    CHECK(json_parse_string("{\"a\":0,5}") == NULL);   /* still invalid JSON */
+    v = json_value_init_object();
+    json_object_set_number(json_value_get_object(v), "x", 0.25);
+    out = json_serialize_to_string(v);
+    CHECK(out && strcmp(out, "{\"x\":0.25}") == 0);
+    if (g_verbose && out) printf("      %s\n", out);
+    json_free_serialized_string(out);
+    json_value_free(v);
+    /* the kernel's own baseline under that locale */
+    {
+        Env e; env_init(&e, FAKE_AMICLOUD);
+        lw(&e, "a.txt", "alpha", T0);
+        run(&e);
+        CHECK_EQ(e.s.uploaded, 1);
+        check_idle(&e);
+        CHECK(baseline_has(&e, "a.txt"));
+        env_free(&e);
+    }
+    setlocale(LC_ALL, "C");
+}
+
 /* same scenario on AmiCloud: the server refuses the non-empty delete,
  * nothing is lost (pins today's behaviour, not a RISK test) */
 static void t_ac_dir_delete_keeps_new_file(void)
@@ -1208,6 +1254,43 @@ static void t_break_mid_run(void)
     CHECK(fake_has(&e.f, rp(&e, "a.txt"), "alpha"));
     CHECK(fake_has(&e.f, rp(&e, "b.txt"), "beta"));
     CHECK(fake_find(&e.f, rp(&e, "old.txt")) == NULL);
+    env_free(&e);
+}
+
+/* S2: Pause/Ctrl-C cancels the transfer in flight (the progress hook
+ * returns 0). That is no error, even if it was the last action -- the
+ * run counts as stopped and the next one does it (found with AmiCloud
+ * Desktop: pausing during the only upload reported "1 Fehler"). */
+static void t_break_cancels_transfer(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    lw(&e, "big.bin", "a lot", T0);
+    fake_fail(&e.f, FOP_PUT, rp(&e, "big.bin"));
+    e.f.fail_breaks = 1;
+    run(&e);
+    ui_break_clear();
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(e.s.aborted);
+    CHECK_EQ(e.s.uploaded, 0);
+    fake_fail(&e.f, FOP_PUT, NULL);
+    e.f.fail_breaks = 0;
+    run(&e);
+    CHECK_EQ(e.s.errors, 0);
+    CHECK_EQ(e.s.uploaded, 1);
+    CHECK(fake_has(&e.f, rp(&e, "big.bin"), "a lot"));
+    /* the same for a download */
+    fake_put_data(&e.f, rp(&e, "down.bin"), "remote", T0);
+    fake_fail(&e.f, FOP_GET, rp(&e, "down.bin"));
+    e.f.fail_breaks = 1;
+    run(&e);
+    ui_break_clear();
+    CHECK_EQ(e.s.errors, 0);
+    CHECK(e.s.aborted);
+    CHECK(!lexists(&e, "down.bin"));
+    fake_fail(&e.f, FOP_GET, NULL);
+    e.f.fail_breaks = 0;
+    run(&e);
+    CHECK(lhas(&e, "down.bin", "remote"));
     env_free(&e);
 }
 
@@ -2045,9 +2128,11 @@ static const Test tests[] = {
     { "kaputter Stand (AmiCloud)",                   t_corrupt_baseline_ac, NULL },
     { "AmiCloud: Ordner-Loeschen behaelt neue Datei", t_ac_dir_delete_keeps_new_file, NULL },
     { "S2: Abbruch mitten im Lauf",                  t_break_mid_run, NULL },
+    { "S2: Abbruch bricht Uebertragung ab, kein Fehler", t_break_cancels_transfer, NULL },
     { "S5: neue lokale Datei in entfernt geloeschtem Ordner (AmiCloud)", t_s5_local_ac, NULL },
     { "S5: neue lokale Datei in entfernt geloeschtem Ordner (WebDAV)",   t_s5_local_dav, NULL },
     { "S13: feste Ausschlussliste",                  t_exclusions, NULL },
+    { "JSON unabhaengig vom Locale",                 t_json_locale, NULL },
     { "Auswahl: Ordner ausgeschlossen (AmiCloud)",   t_sel_basic_ac, NULL },
     { "Auswahl: Ordner ausgeschlossen (WebDAV)",     t_sel_basic_dav, NULL },
     { "Auswahl: spaeter ausgeschlossen (AmiCloud)",  t_sel_exclude_later_ac, NULL },

@@ -1419,6 +1419,7 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
     int         cp_every = SYNC_CHECKPOINT_ACTIONS;
     int         run_name_max = 255;
     int         selection_changed;
+    int         errors_before, viruses_before;   /* before the current action */
 
     if (!opts) { sync_options_init(&defaults); opts = &defaults; }
     dry_run = opts->dry_run;
@@ -1822,6 +1823,8 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
          * rolled back in the baseline and redone by the next run. */
         if (!dry_run && !stopped && ui_break_pending()) stopped = 1;
         if (stopped) { act->skipped = 1; continue; }
+        errors_before = out->errors;
+        viruses_before = out->viruses;
         switch (act->type) {
         case SA_MKDIR_LOCAL:
             if (dry_run) { if (verbose) ui_notify(UI_INFO, "(waere angelegt, lokal)   %s", act->lpath); }
@@ -1965,6 +1968,14 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
         case SA_DEL_LOCAL:
         case SA_DEL_REMOTE:
             continue; /* handled leaf-first in Pass 2b below */
+        }
+        /* S2: a transfer cancelled by the break (the progress hook said
+         * stop) is no error -- the run is stopped, the next one does it */
+        if (!dry_run && act->failed && out->viruses == viruses_before && ui_break_pending()) {
+            act->failed = 0;
+            act->skipped = 1;
+            out->errors = errors_before;
+            stopped = 1;
         }
         act->done = 1;
         if (!dry_run && (++cp_actions >= cp_every ||

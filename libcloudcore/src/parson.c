@@ -36,6 +36,7 @@
 #include <ctype.h>
 #include <math.h>
 #include <errno.h>
+#include <locale.h>
 
 /* Apparently sscanf is not implemented in some "standard" libraries, so don't use it, if you
  * don't have to. */
@@ -856,15 +857,38 @@ static JSON_Value * parse_boolean_value(const char **string) {
     return NULL;
 }
 
+/* AmiCloud: JSON numbers always use '.', but strtod() follows the
+ * process locale -- a Qt client runs with setlocale(LC_ALL, ""), and under
+ * de_DE strtod() read "0,1" as one number, so every object with a number
+ * before another field failed to parse. The number token is copied and
+ * its '.' turned into the locale's decimal point before strtod(). */
+static char locale_decimal_point(void) {
+    const struct lconv *lc = localeconv();
+    return (lc && lc->decimal_point && lc->decimal_point[0] && !lc->decimal_point[1])
+           ? lc->decimal_point[0] : '.';
+}
+
 static JSON_Value * parse_number_value(const char **string) {
+    char buf[NUM_BUF_SIZE];
+    const char *s = *string;
     char *end;
     double number = 0;
-    errno = 0;
-    number = strtod(*string, &end);
-    if (errno || !is_decimal(*string, end - *string)) {
+    size_t n = 0;   /* a ',' never gets into the token: "0,5" stays two values */
+    char dp = locale_decimal_point();
+    while (s[n] && strchr("+-0123456789.eE", s[n]) && n < sizeof(buf) - 1) {
+        buf[n] = (s[n] == '.') ? dp : s[n];
+        n++;
+    }
+    buf[n] = '\0';
+    if (n == 0 || n == sizeof(buf) - 1) {
         return NULL;
     }
-    *string = end;
+    errno = 0;
+    number = strtod(buf, &end);
+    if (errno || end == buf || !is_decimal(s, (size_t)(end - buf))) {
+        return NULL;
+    }
+    *string = s + (end - buf);
     return json_value_init_number(number);
 }
 
@@ -1017,6 +1041,13 @@ static int json_serialize_to_buffer_r(const JSON_Value *value, char *buf, int le
                 written = sprintf(num_buf, "%ld", (long)num);
             } else {
                 written = sprintf(num_buf, FLOAT_FORMAT, num);
+                if (written > 0) {   /* AmiCloud: '.' whatever the locale says */
+                    char dp = locale_decimal_point();
+                    int k;
+                    for (k = 0; dp != '.' && k < written; k++) {
+                        if (num_buf[k] == dp) num_buf[k] = '.';
+                    }
+                }
             }
             if (written < 0) {
                 return -1;

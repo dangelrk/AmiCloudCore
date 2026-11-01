@@ -16,6 +16,10 @@ Fremdkomponente, die unter ihrer eigenen, GPL-kompatiblen Lizenz steht:
 - Lokale Änderung: In `parson.c` werden ganze Zahlen im `long`-Bereich mit
   `%ld` statt `%1.17g` geschrieben. Das `printf` von vbcc für AmigaOS gibt
   manche ganzen Zahlen mit `%1.17g` falsch aus (986 als `985.999999999999`).
+- Lokale Änderung: In `parson.c` hängen Lesen und Schreiben von Zahlen nicht
+  mehr vom Locale des Prozesses ab. `strtod()` und `printf()` folgen sonst dem
+  Dezimalzeichen des Locales; ein Qt-Programm setzt `setlocale(LC_ALL, "")`,
+  und unter `de_DE` las `strtod()` z. B. `0,1` als eine Zahl.
 
 `THIRD-PARTY-NOTICES.txt` enthält denselben Hinweis samt vollem
 MIT-Text als reine Textdatei; `make dist-amiga` legt sie als

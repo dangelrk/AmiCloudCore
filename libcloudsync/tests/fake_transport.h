@@ -57,6 +57,8 @@ struct FakeTransport {
      * or lies below it fails (returns the error code of that op). */
     char fail_path[FOP__N][256];
     int no_conditions;    /* 1: ignore put() conditions (old server) */
+    int fail_breaks;      /* 1: an injected failure also sets the break flag,
+                           * like a transfer cancelled by Pause/Ctrl-C */
     FakeHook hook;
     void *hook_ud;
 };

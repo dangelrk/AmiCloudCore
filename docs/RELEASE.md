@@ -3,7 +3,7 @@
 Gilt für alle drei Projekte, die diesen Core als Submodul `core/` benutzen.
 Erstes Release: **v0.1 vom 31.10.2026** (Tags in allen vier Repos,
 GitHub-Releases bei AmiCloud, AmiOwnCloud und AmiVCS). Zweites Release:
-**v0.2 vom 31.10.2026** (Sync-Datensicherheit, Mindest-CPU 68020). In Arbeit: **0.3** (Umlaute, Virenprüfung, Konflikte behalten beide Fassungen, Schutz vor Massenlöschung).
+**v0.2 vom 31.10.2026** (Sync-Datensicherheit, Mindest-CPU 68020). In Arbeit: **0.3** (Umlaute, Virenprüfung, Konflikte behalten beide Fassungen, Schutz vor Massenlöschung, Ordnerauswahl, JSON unabhängig vom Locale).
 
 ## 1. Version hochsetzen – Pflicht
 

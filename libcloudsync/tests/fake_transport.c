@@ -5,6 +5,7 @@
  * fake_transport.h.
  */
 #include "fake_transport.h"
+#include "ui_hooks.h"
 #include "md5.h"
 
 #include <stdio.h>
@@ -148,7 +149,10 @@ void fake_fail(FakeTransport *f, FakeOp op, const char *path)
 static int enter(FakeTransport *f, FakeOp op, const char *p)
 {
     f->calls[op]++;
-    if (f->fail_path[op][0] && under(p, f->fail_path[op])) return 1;
+    if (f->fail_path[op][0] && under(p, f->fail_path[op])) {
+        if (f->fail_breaks) ui_break_set();   /* cancelled by Pause/Ctrl-C */
+        return 1;
+    }
     if (f->hook) f->hook(f, op, p, f->hook_ud);
     return 0;
 }
