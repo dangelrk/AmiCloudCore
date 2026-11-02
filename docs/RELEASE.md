@@ -9,7 +9,10 @@ Fassungen, Schutz vor Massenlöschung, Ordnerauswahl, JSON unabhängig vom
 Locale, schrittweiser Abgleich, erstes Mac-Programm AmiCloud Desktop). Viertes Release: **v0.4 vom 01.11.2026** (SetDate in den Handlern,
 WebDAV erkennt Server-Änderungen auch bei gleichem ETag, Autosync-Intervall
 der Commodity, Server-Paket im Amiga-Archiv). Fünftes Release: **v0.5 vom 01.11.2026**
-(kein erneuter Anmeldeversuch mit abgelehnten Zugangsdaten).
+(kein erneuter Anmeldeversuch mit abgelehnten Zugangsdaten). Sechstes Release: **v0.6 vom 02.11.2026**
+(AmiVCS: UTF-8-Namen, Schnittstelle für Programme wie die AmigaIDE,
+unstage, git-artiges Auschecken, Sperrdatei, Clone-Fix; AmiCloud und
+AmiOwnCloud unverändert bis auf die Versionsnummer).
 
 ## 1. Version hochsetzen – Pflicht
 
