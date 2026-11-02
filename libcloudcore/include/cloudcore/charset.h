@@ -68,6 +68,34 @@ int cs_list_name(const char *local_dir, const char *utf8_dir, const char *utf8_n
  * cs_to_utf8(). */
 void cs_path_to_utf8(const char *local, char *out, size_t outsz);
 
+/* Names folded for "would these be one file here?": ASCII and Latin-1
+ * letters (U+00C0..U+00DE except U+00D7) to lower case. AmigaOS (the
+ * international mode of FFS, PFS and SFS), macOS and Windows treat
+ * "Äpfel" and "äpfel" as one file, not only "abc" and "ABC".
+ * cs_fold_utf8() takes UTF-8; cs_fold_local() takes the local codeset
+ * (single bytes on the Amiga, folded like ISO-8859-1 -- for another
+ * codeset that may join a pair too many, never one too few; UTF-8 on
+ * the PC). Nothing else changes, so a lossy local name ("Preis_.txt")
+ * folds like any other. out may alias in. Always NUL-terminates. */
+void cs_fold_utf8(const char *in, char *out, size_t outsz);
+void cs_fold_local(const char *in, char *out, size_t outsz);
+
+/* For the handlers: a whole server listing, n names (UTF-8) into
+ * out + i * stride (outsz bytes each), each through cs_list_name().
+ * Names that would be one file on the Amiga (equal after
+ * cs_fold_local(): case, or a lossy name meeting another one) cannot all
+ * be shown under their own name -- every lookup would find the first.
+ * The bytewise smallest server name of such a group keeps its name, the
+ * others are shown as "name_2.ext", "name_3.ext" ... (the first number
+ * free in this listing; before the last '.', so "x_2.info" is the icon
+ * of "x_2"; '_' as for lossy names, '~' would be an AmigaDOS pattern)
+ * and remembered like a lossy name, so cs_path_to_utf8()
+ * leads to the right file. Returns how many were renamed; -1 if out of
+ * memory (the names are then as cs_list_name() gives them). */
+int cs_list_dir(const char *local_dir, const char *utf8_dir,
+                const char *const *utf8_names, int n,
+                char *out, size_t stride, size_t outsz);
+
 /* For the host unit tests only: make the "local" codeset ASCII (every
  * non-ASCII character is lossy) or ISO-8859-1 (built-in), or back to
  * the platform default with mode 0. */

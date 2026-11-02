@@ -329,12 +329,63 @@ static void join_path(char *out, size_t sz, const char *dir, const char *name)
     else snprintf(out, sz, "%s/%s", dir, name);
 }
 
-static const char *mem_find(const char *l)
+static int g_mem_used;   /* entries ever set: skips the scan while 0 */
+
+static int mem_index(const char *l)
 {
     int i;
+    if (!g_mem_used) return -1;
     for (i = 0; i < CS_REMEMBER; i++)
-        if (g_mem[i].l && strcmp(g_mem[i].l, l) == 0) return g_mem[i].u;
-    return NULL;
+        if (g_mem[i].l && strcmp(g_mem[i].l, l) == 0) return i;
+    return -1;
+}
+
+static const char *mem_find(const char *l)
+{
+    int i = mem_index(l);
+    return i < 0 ? NULL : g_mem[i].u;
+}
+
+/* l now stands for u -- also when it stood for another name before (a
+ * "_2" name moves to another file once the listing changes) */
+static void mem_put(const char *l, const char *u)
+{
+    int i = mem_index(l);
+    if (i >= 0) {
+        char *d;
+        if (strcmp(g_mem[i].u, u) == 0) return;
+        if (!(d = cs_dup(u))) return;
+        free(g_mem[i].u);
+        g_mem[i].u = d;
+        return;
+    }
+    /* a free place first (cs_list_dir() frees a directory's pairs and
+     * sets them again -- that must not push other directories' pairs
+     * out of the ring), else the oldest */
+    for (i = 0; i < CS_REMEMBER && g_mem[i].l; i++) ;
+    if (i == CS_REMEMBER) {
+        i = g_mem_next;
+        g_mem_next = (g_mem_next + 1) % CS_REMEMBER;
+        free(g_mem[i].l);
+        free(g_mem[i].u);
+    }
+    g_mem[i].l = cs_dup(l);
+    g_mem[i].u = cs_dup(u);
+    if (!g_mem[i].l || !g_mem[i].u) {
+        free(g_mem[i].l); free(g_mem[i].u);
+        g_mem[i].l = g_mem[i].u = NULL;
+        return;
+    }
+    g_mem_used = 1;
+}
+
+/* l is a server name as it is: an older pair for it is stale */
+static void mem_drop(const char *l)
+{
+    int i = mem_index(l);
+    if (i < 0) return;
+    free(g_mem[i].l); free(g_mem[i].u);
+    g_mem[i].l = g_mem[i].u = NULL;
 }
 
 int cs_list_name(const char *local_dir, const char *utf8_dir, const char *utf8_name,
@@ -342,17 +393,238 @@ int cs_list_name(const char *local_dir, const char *utf8_dir, const char *utf8_n
 {
     char l[AC_MAX_PATH], u[AC_MAX_PATH];
     int exact = cs_from_utf8(utf8_name, out, outsz);
-    if (exact) return 1;
     join_path(l, sizeof(l), local_dir, out);
+    if (exact) {
+        if (g_mem_used) mem_drop(l);
+        return 1;
+    }
     join_path(u, sizeof(u), utf8_dir, utf8_name);
-    if (!mem_find(l)) {
-        free(g_mem[g_mem_next].l);
-        free(g_mem[g_mem_next].u);
-        g_mem[g_mem_next].l = cs_dup(l);
-        g_mem[g_mem_next].u = cs_dup(u);
-        g_mem_next = (g_mem_next + 1) % CS_REMEMBER;
+    mem_put(l, u);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Case folding, names that would be one file                           */
+/* ------------------------------------------------------------------ */
+
+void cs_fold_utf8(const char *in, char *out, size_t outsz)
+{
+    size_t i = 0;
+    if (!outsz) return;
+    for (; *in && i + 1 < outsz; in++, i++) {
+        unsigned char c = (unsigned char)*in;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+        else if (c == 0xC3 && i + 2 < outsz) {
+            unsigned char d = (unsigned char)in[1];
+            /* U+00C0..U+00DE = C3 80..C3 9E, lower case is +0x20 */
+            if (d >= 0x80 && d <= 0x9E && d != 0x97) d = (unsigned char)(d + 0x20);
+            if (in[1]) { out[i++] = (char)c; out[i] = (char)d; in++; continue; }
+        }
+        out[i] = (char)c;
+    }
+    out[i] = '\0';
+}
+
+void cs_fold_local(const char *in, char *out, size_t outsz)
+{
+    size_t i = 0;
+    if (g_mode == M_UTF8) { cs_fold_utf8(in, out, outsz); return; }
+    if (!outsz) return;
+    for (; *in && i + 1 < outsz; in++, i++) {
+        unsigned char c = (unsigned char)*in;
+        if ((c >= 'A' && c <= 'Z') || (c >= 0xC0 && c <= 0xDE && c != 0xD7))
+            c = (unsigned char)(c + 32);
+        out[i] = (char)c;
+    }
+    out[i] = '\0';
+}
+
+/* cs_list_dir(): the listing's folded names and ranks, computed once;
+ * entries sorted by folded name, then rank (a name the last listing
+ * gave out first, then exact names, then new lossy ones), then server
+ * name (qsort has no context argument -- static, like the rest here) */
+static char **g_ld_fold;
+static const char *const *g_ld_utf8;
+static const char *g_ld_rank;
+
+static int ld_cmp(const void *a, const void *b)
+{
+    int ia = *(const int *)a, ib = *(const int *)b;
+    int c = strcmp(g_ld_fold[ia], g_ld_fold[ib]);
+    if (c) return c;
+    if (g_ld_rank[ia] != g_ld_rank[ib]) return g_ld_rank[ia] - g_ld_rank[ib];
+    return strcmp(g_ld_utf8[ia], g_ld_utf8[ib]);
+}
+
+/* 1 if a name of the listing (idx sorted) folds to folded */
+static int ld_taken(const int *idx, int n, const char *folded)
+{
+    int lo = 0, hi = n - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        int c = strcmp(g_ld_fold[idx[mid]], folded);
+        if (c == 0) return 1;
+        if (c < 0) lo = mid + 1; else hi = mid - 1;
     }
     return 0;
+}
+
+/* name -> name_k with the suffix before the last '.' (not a leading
+ * one); the stem is cut if the result would not fit. '_' like
+ * CS_REPLACEMENT: '~' would be a pattern character in AmigaDOS
+ * ("Delete x~2.info" deletes "X.info") */
+static void suffix_name(const char *name, int k, char *out, size_t outsz)
+{
+    char suf[16];
+    const char *dot = strrchr(name, '.');
+    size_t stem, extl, sl;
+    if (!dot || dot == name) dot = name + strlen(name);
+    snprintf(suf, sizeof(suf), "_%d", k);
+    sl = strlen(suf);
+    extl = strlen(dot);
+    stem = (size_t)(dot - name);
+    if (stem + sl + extl + 1 > outsz) {
+        if (sl + extl + 2 > outsz) extl = 0;                 /* no room even for that */
+        stem = outsz > sl + extl + 1 ? outsz - sl - extl - 1 : 0;
+    }
+    memcpy(out, name, stem);
+    memcpy(out + stem, suf, sl);
+    memcpy(out + stem + sl, dot, extl);
+    out[stem + sl + extl] = '\0';
+}
+
+int cs_list_dir(const char *local_dir, const char *utf8_dir,
+                const char *const *utf8_names, int n,
+                char *out, size_t stride, size_t outsz)
+{
+    static char cand[AC_MAX_PATH], fc[AC_MAX_PATH], l[AC_MAX_PATH], u[AC_MAX_PATH];
+    static char lpre[AC_MAX_PATH];
+    int *idx = NULL, i, j, renamed = 0, ngiven = 0;
+    size_t lpl;
+    char **fold = NULL, **base = NULL, **given = NULL;
+    char *rank = NULL, *exact = NULL;
+
+    if (n > 0) {
+        idx   = (int *)malloc(sizeof(int) * (size_t)n);
+        fold  = (char **)calloc((size_t)n, sizeof(char *));
+        base  = (char **)calloc((size_t)n, sizeof(char *));
+        given = (char **)malloc(sizeof(char *) * (size_t)n);
+        rank  = (char *)malloc((size_t)n);
+        exact = (char *)malloc((size_t)n);
+        if (!idx || !fold || !base || !given || !rank || !exact) goto oom;
+    }
+    join_path(lpre, sizeof(lpre), local_dir, "");   /* "dir/" */
+    lpl = strlen(lpre);
+
+    /* 1. names as the plain rule gives them, folded */
+    for (i = 0; i < n; i++) {
+        char *name = out + (size_t)i * stride;
+        exact[i] = (char)cs_from_utf8(utf8_names[i], name, outsz);
+        if (!(base[i] = cs_dup(name))) goto oom;
+        cs_fold_local(name, fc, sizeof(fc));
+        if (!(fold[i] = cs_dup(fc))) goto oom;
+        rank[i] = (char)(exact[i] ? 1 : 2);
+        idx[i] = i;
+    }
+
+    /* 2. a name that still meets another one keeps what the last listing
+     *    of this directory showed for it ("x_2", a lossy name) -- an open
+     *    file keeps its meaning; once alone it gets its plain name back */
+    if (n > 1 && g_mem_used) {
+        g_ld_fold = fold; g_ld_utf8 = utf8_names; g_ld_rank = exact;   /* any order */
+        qsort(idx, (size_t)n, sizeof(int), ld_cmp);
+        for (i = 0; i < n; i++) {
+            int me = idx[i];
+            char *name = out + (size_t)me * stride;
+            if (!((i > 0 && strcmp(fold[idx[i - 1]], fold[me]) == 0) ||
+                  (i + 1 < n && strcmp(fold[idx[i + 1]], fold[me]) == 0)))
+                continue;
+            join_path(u, sizeof(u), utf8_dir, utf8_names[me]);
+            for (j = 0; j < CS_REMEMBER; j++)
+                if (g_mem[j].l && strncmp(g_mem[j].l, lpre, lpl) == 0
+                    && !strchr(g_mem[j].l + lpl, '/') && strcmp(g_mem[j].u, u) == 0
+                    && strlen(g_mem[j].l + lpl) < outsz) {
+                    strcpy(name, g_mem[j].l + lpl);
+                    rank[me] = 0;
+                    break;
+                }
+        }
+        for (i = 0; i < n; i++) {
+            if (rank[i] != 0) continue;
+            cs_fold_local(out + (size_t)i * stride, fc, sizeof(fc));
+            free(fold[i]);
+            if (!(fold[i] = cs_dup(fc))) goto oom;
+        }
+        for (i = 0; i < n; i++) idx[i] = i;
+    }
+
+    /* 3. names that would be one file here: the group's first keeps its
+     *    name, the others get the first "_k" free in this listing */
+    if (n > 1) {
+        g_ld_fold = fold; g_ld_utf8 = utf8_names; g_ld_rank = rank;
+        qsort(idx, (size_t)n, sizeof(int), ld_cmp);
+        for (i = 1; i < n; i++) {
+            char *name = out + (size_t)idx[i] * stride;
+            int k, used;
+            if (strcmp(fold[idx[i - 1]], fold[idx[i]]) != 0) continue;
+            for (k = 2; ; k++) {
+                suffix_name(base[idx[i]], k, cand, outsz < sizeof(cand) ? outsz : sizeof(cand));
+                cs_fold_local(cand, fc, sizeof(fc));
+                if (ld_taken(idx, n, fc)) continue;
+                for (j = 0, used = 0; j < ngiven && !used; j++) used = strcmp(given[j], fc) == 0;
+                if (!used) break;
+            }
+            if (!(given[ngiven] = cs_dup(fc))) goto oom;
+            ngiven++;
+            strcpy(name, cand);
+            renamed++;
+        }
+    }
+
+    /* 3b. the table forgets this directory: its own pairs, and those
+     *     below a name it no longer shows (its own set again in 4.) */
+    if (g_mem_used)
+        for (j = 0; j < CS_REMEMBER; j++) {
+            const char *rest, *slash;
+            int keep = 0;
+            if (!g_mem[j].l || strncmp(g_mem[j].l, lpre, lpl) != 0) continue;
+            rest = g_mem[j].l + lpl;
+            slash = strchr(rest, '/');
+            if (slash)   /* below a child: kept if this listing still shows it */
+                for (i = 0; i < n && !keep; i++) {
+                    const char *nm = out + (size_t)i * stride;
+                    if (strlen(nm) != (size_t)(slash - rest)
+                        || strncmp(nm, rest, (size_t)(slash - rest)) != 0) continue;
+                    /* ... and still for the same server directory */
+                    join_path(u, sizeof(u), utf8_dir, utf8_names[i]);
+                    keep = strncmp(g_mem[j].u, u, strlen(u)) == 0 && g_mem[j].u[strlen(u)] == '/';
+                }
+            if (keep) continue;
+            free(g_mem[j].l); free(g_mem[j].u);
+            g_mem[j].l = g_mem[j].u = NULL;
+        }
+
+    /* 4. every shown name that is not its server name as it is */
+    for (i = 0; i < n; i++) {
+        const char *name = out + (size_t)i * stride;
+        if (exact[i] && strcmp(name, base[i]) == 0) continue;
+        join_path(l, sizeof(l), local_dir, name);
+        join_path(u, sizeof(u), utf8_dir, utf8_names[i]);
+        mem_put(l, u);
+    }
+    goto done;
+
+oom:
+    /* names as cs_list_name() gives them, like before cs_list_dir() */
+    for (i = 0; i < n; i++)
+        cs_list_name(local_dir, utf8_dir, utf8_names[i], out + (size_t)i * stride, outsz);
+    renamed = -1;
+done:
+    if (given) for (i = 0; i < ngiven; i++) free(given[i]);
+    if (fold) for (i = 0; i < n; i++) free(fold[i]);
+    if (base) for (i = 0; i < n; i++) free(base[i]);
+    free(given); free(fold); free(base); free(idx); free(rank); free(exact);
+    return renamed;
 }
 
 void cs_path_to_utf8(const char *local, char *out, size_t outsz)

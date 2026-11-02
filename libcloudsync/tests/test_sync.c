@@ -1599,6 +1599,26 @@ static void t_case_collision_dirs(void)
     env_free(&e);
 }
 
+/* S6 with umlauts: AmigaOS (international mode), macOS and Windows also
+ * fold the Latin-1 letters, "\xC3\x84pfel.txt" and "\xC3\xA4pfel.txt" are
+ * one file there */
+static void t_case_collision_umlaut(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    if (!case_insensitive_fs(&e)) { env_free(&e); SKIP("Dateisystem unterscheidet Gross/Klein"); }
+    fake_put_data(&e.f, rp(&e, "\xC3\x84pfel.txt"), "upper", T0);
+    fake_put_data(&e.f, rp(&e, "\xC3\xA4pfel.txt"), "lower", T0);
+    fake_put_data(&e.f, rp(&e, "fine.txt"), "fine", T0);
+    run(&e);
+    run(&e);
+    CHECK(fake_has(&e.f, rp(&e, "\xC3\x84pfel.txt"), "upper"));
+    CHECK(fake_has(&e.f, rp(&e, "\xC3\xA4pfel.txt"), "lower"));
+    CHECK(lhas(&e, "fine.txt", "fine"));
+    CHECK(!lexists(&e, "\xC3\xA4pfel.txt"));
+    CHECK_EQ(e.f.calls[FOP_PUT] + e.f.calls[FOP_DEL], 0);
+    env_free(&e);
+}
+
 /* S7: a file edited after the scan is not deleted */
 static void t_delete_keeps_fresh_edit(void)
 {
@@ -2708,6 +2728,7 @@ static const Test tests[] = {
     { "S2: Abbruch vor dem Lauf",                          r_break_ignored,                NULL },
     { "S6: Gross/Klein-Kollision (Dateien)",            r_case_collision,               NULL },
     { "S6: Gross/Klein-Kollision (Ordner)",             t_case_collision_dirs,          NULL },
+    { "S6: Gross/Klein-Kollision (Umlaute)",            t_case_collision_umlaut,        NULL },
     { "S9: fremde Aenderung waehrend des Laufs",        r_global_rev_at_end,            NULL },
     { "S14: fehlgeschlagener Download wiederholt",       r_failed_download_never_retried, NULL },
     { "S7: Download laesst frische Aenderung",          r_download_overwrites_fresh_edit, NULL },

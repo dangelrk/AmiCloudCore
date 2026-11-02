@@ -467,13 +467,11 @@ static void drop_excluded(SyncState *st, const SyncOptions *o)
  * file system (AmigaOS, macOS, Windows) cannot: both would land in one
  * local file, and the next run would upload the wrong content or delete
  * one of them remotely. Such paths -- with everything below them -- are
- * skipped on both sides and reported. ASCII folding only. */
+ * skipped on both sides and reported. ASCII and Latin-1 letters
+ * ("\xC3\x84pfel" and "\xC3\xA4pfel" too), cs_fold_utf8(). */
 static void fold_case(char *out, size_t sz, const char *in)
 {
-    size_t i;
-    for (i = 0; in[i] && i + 1 < sz; i++)
-        out[i] = (in[i] >= 'A' && in[i] <= 'Z') ? (char)(in[i] + 32) : in[i];
-    out[i] = '\0';
+    cs_fold_utf8(in, out, sz);
 }
 
 static int folded_cmp(const void *a, const void *b)

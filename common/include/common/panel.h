@@ -90,11 +90,25 @@ void panel_copy_file(PanelSource ssrc, const AcConfig *scfg, const char *spath,
                      const char *name, const FileMeta *smeta,
                      const FileMeta *dmeta, CopyCtx *c);
 
+/* Server names (UTF-8, one directory) that would be one file in
+ * local_dir: the same name there apart from case (Latin-1 umlauts
+ * included, cs_fold_local()) where local_dir ignores case, or two lossy
+ * names meeting ("Preis_.txt" for "Preis\xE2\x82\xAC.txt" and
+ * "Preis\xE2\x86\x92.txt"). Downloading both would overwrite the first
+ * one locally -- and a move would then delete both on the server. Sets
+ * skip[i] to 1 for every such name (all of a group, no name wins),
+ * warns once per name and returns how many; the caller counts them as
+ * errors. local_dir need not exist yet (then it counts as ignoring
+ * case). -1 if out of memory (nothing marked). */
+int panel_local_clashes(const char *const *unames, int n, const char *local_dir,
+                        unsigned char *skip);
+
 /* Recursive get/put orchestration — shared by the shell's `get -r`/
  * `put -r` and the GUI Commander's F5 copy. When c->ask, also prompts
  * (via ui_overwrite(), is_dir=1) if remote_path/local_path already
  * exists before merging into it, and prompts per conflicting file
- * inside via panel_copy_file(). */
+ * inside via panel_copy_file(). panel_get_dir() skips the names
+ * panel_local_clashes() finds, counted in c->pr.err. */
 void panel_get_dir(const AcConfig *cfg, const char *remote_path,
                    const char *local_path, CopyCtx *c);
 void panel_put_dir(const AcConfig *cfg, const char *local_path,

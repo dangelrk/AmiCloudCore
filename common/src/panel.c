@@ -333,6 +333,73 @@ void panel_copy_file(PanelSource ssrc, const AcConfig *scfg, const char *spath,
     }
 }
 
+/* panel_local_clashes(): local keys, sorted (qsort has no context) */
+static char **g_pc_key;
+
+static int pc_cmp(const void *a, const void *b)
+{
+    return strcmp(g_pc_key[*(const int *)a], g_pc_key[*(const int *)b]);
+}
+
+/* marks every key that occurs more than once; returns how many */
+static int pc_mark(char **key, int n, unsigned char *skip)
+{
+    int *idx = (int *)malloc(sizeof(int) * (size_t)n);
+    int i, marked = 0;
+    if (!idx) return -1;
+    for (i = 0; i < n; i++) idx[i] = i;
+    g_pc_key = key;
+    qsort(idx, (size_t)n, sizeof(int), pc_cmp);
+    for (i = 0; i < n; i++) {
+        int dup = (i > 0 && strcmp(key[idx[i]], key[idx[i - 1]]) == 0) ||
+                  (i + 1 < n && strcmp(key[idx[i]], key[idx[i + 1]]) == 0);
+        if (dup) { skip[idx[i]] = 1; marked++; }
+    }
+    free(idx);
+    return marked;
+}
+
+int panel_local_clashes(const char *const *unames, int n, const char *local_dir,
+                        unsigned char *skip)
+{
+    char **key;
+    int i, marked = 0, folded = 1;
+    if (n < 2) return 0;
+    key = (char **)calloc((size_t)n, sizeof(char *));
+    if (!key) return -1;
+    for (;;) {
+        for (i = 0; i < n; i++) {
+            char l[AC_MAX_PATH];
+            cs_from_utf8(unames[i], l, sizeof(l));
+            if (folded) cs_fold_local(l, l, sizeof(l));
+            free(key[i]);
+            if (!(key[i] = (char *)malloc(strlen(l) + 1))) { marked = -1; goto out; }
+            strcpy(key[i], l);
+        }
+        memset(skip, 0, (size_t)n);
+        marked = pc_mark(key, n, skip);
+        /* only a clash by case: does this disk care? (the probe writes a
+         * file, so only now; a missing directory counts as ignoring) */
+        if (marked <= 0 || !folded || !localfs_exists(local_dir) ||
+            !localfs_case_sensitive(local_dir))
+            break;
+        folded = 0;   /* case-sensitive disk: only lossy names can meet */
+    }
+    if (marked > 0)
+        for (i = 0; i < n; i++)
+            if (skip[i]) {
+                char l[AC_MAX_PATH];
+                cs_from_utf8(unames[i], l, sizeof(l));
+                ui_notify(UI_WARN, "'%s': waere hier dieselbe Datei wie ein anderer Name "
+                          "auf dem Server (Gross/Klein, Sonderzeichen) -- uebersprungen", l);
+            }
+out:
+    if (marked < 0) memset(skip, 0, (size_t)n);
+    for (i = 0; i < n; i++) free(key[i]);
+    free(key);
+    return marked;
+}
+
 void panel_get_dir(const AcConfig *cfg, const char *remote_path,
                    const char *local_path, CopyCtx *c)
 {
@@ -380,9 +447,27 @@ void panel_get_dir(const AcConfig *cfg, const char *remote_path,
     {
         int dst_n = 0;
         LocalDirEntry *dst_entries = dst_existed ? local_dir_snapshot(local_path, &dst_n) : NULL;
+        unsigned char *skip = n > 1 ? (unsigned char *)calloc((size_t)n, 1) : NULL;
+        const char **un = n > 1 ? (const char **)malloc(sizeof(char *) * (size_t)n) : NULL;
+
+        int k = 0;
+
+        /* names that would be one file here: neither is fetched */
+        if (skip && un) {
+            for (i = 0; i < n; i++) un[i] = entries[i].name;
+            k = panel_local_clashes(un, n, local_path, skip);
+            if (k > 0) c->pr.err += k;
+        }
+        if (n > 1 && (!skip || !un || k < 0)) {
+            ui_notify(UI_ERROR, "amicloudcore: out of memory listing %s", remote_path);
+            c->pr.err++;
+            n = 0;
+        }
+        free(un);
 
         for (i = 0; i < n; i++) {
             char rchild[AC_MAX_PATH], lchild[AC_MAX_PATH], lname[AC_MAX_PATH];
+            if (skip && skip[i]) continue;
             /* Phase 4: server names are UTF-8, local ones in the local codeset */
             cs_from_utf8(entries[i].name, lname, sizeof(lname));
             snprintf(rchild, sizeof(rchild), "%s/%s", remote_path, entries[i].name);
@@ -410,6 +495,7 @@ void panel_get_dir(const AcConfig *cfg, const char *remote_path,
             }
             if (c->cancelled) break;
         }
+        free(skip);
         free(dst_entries);
     }
     cmd_entries_free(entries);
