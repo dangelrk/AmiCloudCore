@@ -12,7 +12,11 @@ der Commodity, Server-Paket im Amiga-Archiv). Fünftes Release: **v0.5 vom 01.11
 (kein erneuter Anmeldeversuch mit abgelehnten Zugangsdaten). Sechstes Release: **v0.6 vom 02.11.2026**
 (AmiVCS: UTF-8-Namen, Schnittstelle für Programme wie die AmigaIDE,
 unstage, git-artiges Auschecken, Sperrdatei, Clone-Fix; AmiCloud und
-AmiOwnCloud unverändert bis auf die Versionsnummer).
+AmiOwnCloud unverändert bis auf die Versionsnummer). Siebtes Release: **v0.7 vom 02.11.2026**
+(Namen, die sich nur in Groß-/Kleinschreibung unterscheiden: Handler zeigen
+sie als `name_2`, Abgleich/Downloads überspringen sie, auch bei Umlauten;
+AmiVCS-Clone räumt bei solchen Namen auf; Commander verschiebt nur nach
+erfolgreicher Kopie).
 
 ## 1. Version hochsetzen – Pflicht
 
