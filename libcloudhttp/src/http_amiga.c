@@ -76,6 +76,7 @@
 #include "base64.h"
 #include "ui_hooks.h"
 #include "authguard.h"
+#include "cloudtime.h"
 
 /* ------------------------------------------------------------------ */
 /* Library bases (opened in http_init)                                 */
@@ -525,8 +526,26 @@ static SSL *tls_connect(const char *host, int port, int verify,
         if (r != IO_DONE) {
             if (r == IO_TIMEOUT)
                 HERR("amicloudcore: TLS handshake with %s timed out (no data for %d s)\n", host, g_timeout);
-            else if (r != IO_ABORT)
-                HERR("amicloudcore: TLS handshake with %s failed\n", host);
+            else if (r != IO_ABORT) {
+                long vr = verify ? SSL_get_verify_result(ssl) : X509_V_OK;
+                if (vr == X509_V_ERR_CERT_NOT_YET_VALID ||
+                    vr == X509_V_ERR_CERT_HAS_EXPIRED) {
+                    /* Almost always the Amiga's clock, not the server: a
+                     * flat RTC battery boots it into some year long past,
+                     * and every certificate is then "not yet valid". */
+                    char now[24];
+                    ac_format_system_clock(now, (int)sizeof(now));
+                    HERR("amicloudcore: TLS: certificate of %s %s - Amiga clock is %s, "
+                         "please check date/time\n", host,
+                         vr == X509_V_ERR_CERT_NOT_YET_VALID ? "not yet valid" : "expired",
+                         now);
+                } else if (vr != X509_V_OK) {
+                    HERR("amicloudcore: TLS: certificate of %s rejected (%s)\n",
+                         host, X509_verify_cert_error_string(vr));
+                } else {
+                    HERR("amicloudcore: TLS handshake with %s failed\n", host);
+                }
+            }
             /* A rejected or broken resumption must not poison the next try. */
             if (r != IO_ABORT) sess_forget();
             SSL_free(ssl);

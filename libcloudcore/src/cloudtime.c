@@ -4,6 +4,11 @@
 #include "cloudtime.h"
 
 #ifdef PLATFORM_AMIGA
+#include <stdio.h>
+#include <proto/dos.h>
+#endif
+
+#ifdef PLATFORM_AMIGA
 
 void ac_civil_from_days(long z, int *y, int *m, int *d)
 {
@@ -36,6 +41,17 @@ void ac_epoch_to_datestamp(long epoch, int gmt_offset_minutes, int dst, struct D
     ds->ds_Days   = local_secs / 86400L;
     ds->ds_Minute = (local_secs % 86400L) / 60L;
     ds->ds_Tick   = (local_secs % 60L) * 50L;
+}
+
+void ac_format_system_clock(char *buf, int bufsize)
+{
+    struct DateStamp ds;
+    int y, m, d;
+
+    DateStamp(&ds);
+    ac_civil_from_days((long)ds.ds_Days + AC_AMIGA_EPOCH_SHIFT_DAYS, &y, &m, &d);
+    snprintf(buf, (size_t)bufsize, "%02d.%02d.%04d %02ld:%02ld",
+             d, m, y, (long)(ds.ds_Minute / 60), (long)(ds.ds_Minute % 60));
 }
 
 #endif /* PLATFORM_AMIGA */

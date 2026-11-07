@@ -33,6 +33,11 @@ long ac_datestamp_to_epoch(const struct DateStamp *ds, int gmt_offset_minutes, i
  * Amiga epoch (1978-01-01) — not a realistic case for real files. */
 void ac_epoch_to_datestamp(long epoch, int gmt_offset_minutes, int dst, struct DateStamp *ds);
 
+/* Current system clock as "DD.MM.YYYY HH:MM" (local, as the Amiga sees
+ * it). For error messages that hinge on the clock — e.g. a TLS
+ * certificate "not yet valid" because the RTC battery is flat. */
+void ac_format_system_clock(char *buf, int bufsize);
+
 #endif /* PLATFORM_AMIGA */
 
 #endif /* CLOUDCORE_CLOUDTIME_H */
