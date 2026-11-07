@@ -156,4 +156,15 @@ UWORD prefsgui_wait_action(struct Window *win, UWORD *code_out);
  * "not saved permanently yet") or both exist and are byte-identical. */
 int prefsgui_files_differ(const char *path_a, const char *path_b);
 
+/* ------------------------------------------------------------------ */
+/* Window position memory for these non-MUI tools: "left top" in the   */
+/* global variable `var` (e.g. "AmiCloud/Windows/AmiCloudPrefs"),      */
+/* kept in ENV: and ENVARC: so it survives a reboot.                    */
+/* ------------------------------------------------------------------ */
+/* Overwrites *left/*top with the saved position -- only if there is
+ * one and a w x h window there still fits on the screen. */
+void prefsgui_winpos_load(const char *var, WORD w, WORD h, WORD *left, WORD *top);
+/* Stores win's current position; call right before CloseWindow(). */
+void prefsgui_winpos_save(const char *var, struct Window *win);
+
 #endif /* PREFSGUI_H */

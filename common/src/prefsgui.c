@@ -16,6 +16,8 @@
 #include <proto/exec.h>
 #include <proto/intuition.h>
 #include <proto/gadtools.h>
+#include <proto/dos.h>
+#include <dos/var.h>
 
 #include <string.h>
 #include <stdio.h>
@@ -297,4 +299,55 @@ int prefsgui_files_differ(const char *path_a, const char *path_b)
     fclose(fa);
     fclose(fb);
     return result;
+}
+
+/* ---- window position memory ---- */
+
+void prefsgui_winpos_load(const char *var, WORD w, WORD h, WORD *left, WORD *top)
+{
+    char buf[32];
+    long l, t;
+    struct Screen *scr = prefsgui_screen();
+
+    if (GetVar((STRPTR)var, (STRPTR)buf, sizeof(buf), GVF_GLOBAL_ONLY) <= 0)
+        return;
+    if (sscanf(buf, "%ld %ld", &l, &t) != 2)
+        return;
+    if (l < 0 || t < 0)
+        return;
+    if (scr && (l + w > scr->Width || t + h > scr->Height))
+        return;   /* screen got smaller: keep the default */
+    *left = (WORD)l;
+    *top = (WORD)t;
+}
+
+/* SetVar() does not create directories, so "AmiCloud/Windows/x" needs
+ * ENV:AmiCloud/Windows and ENVARC:AmiCloud/Windows to exist first. */
+static void winpos_make_dirs(const char *var)
+{
+    static const char *const roots[] = { "ENV:", "ENVARC:" };
+    char path[160];
+    int r;
+    size_t i;
+
+    for (r = 0; r < 2; r++) {
+        strcpy(path, roots[r]);
+        for (i = 0; var[i] && strlen(path) + 1 < sizeof(path); i++) {
+            if (var[i] == '/') {
+                BPTR lock = CreateDir((STRPTR)path);
+                if (lock) UnLock(lock);
+            }
+            path[strlen(path) + 1] = '\0';
+            path[strlen(path)] = var[i];
+        }
+    }
+}
+
+void prefsgui_winpos_save(const char *var, struct Window *win)
+{
+    char buf[32];
+    if (!win) return;
+    sprintf(buf, "%d %d", (int)win->LeftEdge, (int)win->TopEdge);
+    winpos_make_dirs(var);
+    SetVar((STRPTR)var, (STRPTR)buf, -1, GVF_GLOBAL_ONLY | GVF_SAVE_VAR);
 }

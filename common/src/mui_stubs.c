@@ -27,3 +27,10 @@ Object *MUI_MakeObject(LONG type, ...)
 {
     return MUI_MakeObjectA(type, (ULONG *)(((ULONG)&type) + sizeof(type)));
 }
+
+void mui_remember_window(Object *win)
+{
+    if (!win) return;
+    DoMethod(win, MUIM_Notify, MUIA_Window_Open, FALSE,
+             win, 2, MUIM_Window_Snapshot, 1);
+}

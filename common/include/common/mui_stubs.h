@@ -64,4 +64,16 @@ LONG    MUI_Request(APTR app, APTR win, LONGBITS flags, char *title,
                      char *gadgets, char *format, ...);
 Object *MUI_MakeObject(LONG type, ...);
 
+/* Window position memory. MUI keeps a window's place and size for the
+ * session as long as it has a MUIA_Window_ID; a snapshot (the method
+ * behind the snapshot gadget, V11, not in the 3.8 headers) makes it
+ * permanent. mui_remember_window() snapshots `win` every time it is
+ * closed -- by the user or by the program on quit -- so all programs
+ * reopen where they were left. Call once per window after it has been
+ * added to the application; the window needs a MUIA_Window_ID. */
+#ifndef MUIM_Window_Snapshot
+#define MUIM_Window_Snapshot 0x8042945e
+#endif
+void mui_remember_window(Object *win);
+
 #endif /* GUI_AMIGA_MUI_STUBS_H */
