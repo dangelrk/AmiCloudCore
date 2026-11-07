@@ -16,7 +16,8 @@ AmiOwnCloud unverändert bis auf die Versionsnummer). Siebtes Release: **v0.7 vo
 (Namen, die sich nur in Groß-/Kleinschreibung unterscheiden: Handler zeigen
 sie als `name_2`, Abgleich/Downloads überspringen sie, auch bei Umlauten;
 AmiVCS-Clone räumt bei solchen Namen auf; Commander verschiebt nur nach
-erfolgreicher Kopie).
+erfolgreicher Kopie). Achtes Release: **v0.8 vom 07.11.2026** (Handbücher
+überarbeitet, Installer erkennt ein falsches Arbeitsverzeichnis).
 
 ## 1. Version hochsetzen – Pflicht
 
@@ -49,6 +50,9 @@ Die Version steht **nur** in `libcloudcore/include/cloudcore/version.h`:
     `AmiCloud-Handbuch.html` („Programme 0.1 (2026)“), `AmiVCS.guide`
     und `AmiVCS-Handbuch.html` („Programmversion 0.1“),
     `AmiOwnCloud.guide` (Tabelle mit Programm, Version und Datum).
+  - **`$VER` der Guides nie senken.** Der Installer behält Dateien mit höherer
+    Version. `AmiCloud.guide` und `AmiOwnCloud.guide` führen deshalb eine eigene
+    Handbuch-Version (1.3 ab 07.11.2026) und zählen nur aufwärts.
   - Die Server-API-Version von AmiVCS (`{"status":"ok","version":"0.1"}`)
     ist eine eigene Version und hat mit den Amiga-Programmen nichts zu tun.
 
@@ -221,6 +225,20 @@ Commits und Push nur, wenn der Nutzer es ausdrücklich will.
    Der Core bekommt nur einen Tag, kein Release.
 4. Assets prüfen: `gh release view v<version> --repo dangelrk/<Projekt>`.
    Die Größen müssen zu den lokalen Archiven passen.
+
+## 5a. Web-Anleitungen aktualisieren – Pflicht
+
+Bei jeder neuen Version gehören die bebilderten Anleitungen mit dazu. Sie
+nennen die Versionsnummer jedes Programms. Ablauf und Upload stehen in
+`AmiCloud/website/README.md`:
+
+```sh
+python3 ~/Dev/AmiCloud/website/build.py
+```
+
+Der Bau übernimmt Versionsnummern und Handbuchtexte selbst und warnt, wenn die
+Bilder aus einer älteren Version stammen. Geänderte Oberflächen neu aufnehmen,
+die Texte in `website/src/` durchsehen. Hochgeladen wird nur auf Zuruf.
 
 ## 6. Aminet (noch nie gemacht)
 
