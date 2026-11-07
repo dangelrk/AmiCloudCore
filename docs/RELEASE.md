@@ -17,7 +17,9 @@ AmiOwnCloud unverändert bis auf die Versionsnummer). Siebtes Release: **v0.7 vo
 sie als `name_2`, Abgleich/Downloads überspringen sie, auch bei Umlauten;
 AmiVCS-Clone räumt bei solchen Namen auf; Commander verschiebt nur nach
 erfolgreicher Kopie). Achtes Release: **v0.8 vom 07.11.2026** (Handbücher
-überarbeitet, Installer erkennt ein falsches Arbeitsverzeichnis).
+überarbeitet, Installer erkennt ein falsches Arbeitsverzeichnis). Neuntes Release: **v0.9 vom 07.11.2026**
+(leere Dateien in den Handlern, Branchnamen mit Umlauten beim Push,
+Server-Wettlauf Löschen/Hochladen, Hinweis auf den experimentellen Status).
 
 ## 1. Version hochsetzen – Pflicht
 
