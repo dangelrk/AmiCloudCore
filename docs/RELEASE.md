@@ -160,6 +160,8 @@ den Selbsttest gegen einen Testserver laufen lassen (CMake-Ziel
 `amicloud-desktop-selftest`, Umgebung `AC_TEST_SERVER/USER/PASS`). Die .dmg
 kommt an das AmiCloud-Release. Windows und Linux baut der Autor auf dem
 jeweiligen System.
+Wie Windows- und Linux-Rechner dafür eingerichtet werden:
+[PC-ENTWICKLUNG.md](PC-ENTWICKLUNG.md).
 
 ## 4. Im Emulator testen
 
