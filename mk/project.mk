@@ -44,6 +44,8 @@ VERSION   ?= $(shell sed -n 's/^\#define AC_VERSION *"\([^"]*\)".*/\1/p' $(VERSI
 # Build date = the day "make" runs (see version.h). Exported, so every
 # sub-make passes the same -DAC_BUILD_DATE; override with DATE=dd.mm.yyyy.
 DATE      ?= $(shell date +%d.%m.%Y)
+# finished release archives are also copied here, if the directory exists
+AMIGA_DROP ?= $(HOME)/Dev/Amiga
 export AC_BUILD_DATE := $(DATE)
 VER_MAJOR  = $(word 1,$(subst ., ,$(VERSION)))
 VER_REVN   = $(shell expr $(word 2,$(subst ., ,$(VERSION))) + 1)
@@ -116,7 +118,10 @@ dist-amiga: amiga
 	rm -rf $(DIST_DIR) $(DIST_DIR).info
 	mkdir -p $(DIST_DIR)/C $(DIST_DIR)/Docs $(DIST_DIR)/Examples
 	cp bin/amiga/* $(DIST_DIR)/C/
-	cp docs/user/*.guide $(DIST_DIR)/Docs/
+	@# the guides' $$VER line gets this version and the build date
+	for g in docs/user/*.guide; do \
+	    LC_ALL=C sed 's/^@\$$VER: \([^ ]*\) [^ ]* ([^)]*)/@$$VER: \1 $(VERSION) ($(DATE))/' \
+	        "$$g" > $(DIST_DIR)/Docs/$${g##*/}; done
 	for f in config-examples/*; do case "$$f" in *.md) ;; *) cp "$$f" $(DIST_DIR)/Examples/ ;; esac; done
 	for f in install/amiga/*; do case "$${f##*/}" in icons.spec|aminet.readme) ;; *) cp -R "$$f" $(DIST_DIR)/ ;; esac; done
 	@for x in $(DIST_EXTRA); do \
@@ -167,6 +172,9 @@ release:
 	    cp $(RELEASE_DIR)/$(PROJECT)-$(VERSION).readme $(AMINET_DIR)/$(PROJECT).readme && \
 	    ls -l $(AMINET_DIR)/$(PROJECT).*; fi
 	@ls -l $(RELEASE_DIR)/$(PROJECT)-$(VERSION).*
+	@if [ -d "$(AMIGA_DROP)" ]; then \
+	    cp $(RELEASE_DIR)/$(PROJECT)-$(VERSION).* "$(AMIGA_DROP)/" && \
+	    echo "kopiert nach $(AMIGA_DROP)/"; fi
 
 # Server package (projects with a server/ folder): server files, LICENSE,
 # SERVER_EXTRA (source[:target]) and INSTALL.md = install/server/README.md

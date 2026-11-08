@@ -25,7 +25,7 @@
 #ifndef CLOUDCORE_VERSION_H
 #define CLOUDCORE_VERSION_H
 
-#define AC_VERSION "0.10"        /* version.revision, both numbers */
+#define AC_VERSION "0.11"        /* version.revision, both numbers */
 
 #define AC_STR_(x) #x
 #define AC_STR(x)  AC_STR_(x)
