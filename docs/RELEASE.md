@@ -19,7 +19,11 @@ AmiVCS-Clone räumt bei solchen Namen auf; Commander verschiebt nur nach
 erfolgreicher Kopie). Achtes Release: **v0.8 vom 07.11.2026** (Handbücher
 überarbeitet, Installer erkennt ein falsches Arbeitsverzeichnis). Neuntes Release: **v0.9 vom 07.11.2026**
 (leere Dateien in den Handlern, Branchnamen mit Umlauten beim Push,
-Server-Wettlauf Löschen/Hochladen, Hinweis auf den experimentellen Status).
+Server-Wettlauf Löschen/Hochladen, Hinweis auf den experimentellen Status). Zehntes Release: **v0.10 vom 08.11.2026**
+(AmiVCS: Remote-URL und Login pro Repository, Identität wie bei git,
+AmiVCSConfig statt AMIVCSPrefs; alle Amiga-GUI-Programme merken ihre
+Fensterposition; verständliche Meldung bei TLS-Fehlern durch eine falsche
+Amiga-Uhr; Haftungsausschluss in den Aminet-Readmes).
 
 ## 1. Version hochsetzen – Pflicht
 
