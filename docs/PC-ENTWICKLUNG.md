@@ -27,7 +27,8 @@ StatusNotifier (Phase 8).
 
 ## 2. Gemeinsam für beide Systeme
 
-- **GitHub-Zugang:** Die Repositories sind privat. Mit der GitHub-CLI
+- **GitHub-Zugang:** Die Repositories sind öffentlich (seit 08.11.2026),
+  Klonen geht ohne Anmeldung. Zum Pushen mit der GitHub-CLI
   anmelden (`gh auth login`, „HTTPS“, „Login with a web browser“) und
   `gh auth setup-git` aufrufen, dann klappen `git clone/pull/push`.
 - **Git-Identität** wie auf dem Mac:

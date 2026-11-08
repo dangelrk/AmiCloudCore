@@ -219,7 +219,7 @@ Commits und Push nur, wenn der Nutzer es ausdrücklich will.
    git tag -a v<version> -m "<Projekt> <version> (<datum>)"
    git push origin main v<version>
    ```
-3. GitHub-Releases (die Repos sind derzeit privat):
+3. GitHub-Releases (die Repos sind seit 08.11.2026 öffentlich):
    ```sh
    gh release create v<version> --repo dangelrk/<Projekt> \
      --title "<Projekt> <version>" --notes-file notes.md \
@@ -274,7 +274,10 @@ wiki.aminet.net/The_Readme_file.
   `codesets.library` (`util/libs/codesets-6.22.lha`) und `xvs.library`
   (`util/virus/xvslibrary.lha`) stehen im Abschnitt Requirements.
   AmiVCS braucht weder codesets noch xvs.
-- Die Quellen sind privat. Die Readmes verweisen deshalb nicht auf GitHub.
+- Die Quellen sind öffentlich: Die Readmes nennen unter License die
+  GitHub-Adresse (`Source code: https://github.com/dangelrk/<Projekt>`) und
+  enthalten einen Abschnitt Disclaimer (keine Gewährleistung, keine Haftung
+  für Datenverlust). Nur ASCII.
   Der Server liegt in AmiCloud und AmiVCS als Schublade `Server` bei.
 - Nur `.lha` und `.readme` hochladen. AmiSuite gibt es nur auf GitHub.
 - **Hochladen** per FTP (das Web-Formular ist derzeit außer Betrieb):
