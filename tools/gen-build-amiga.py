@@ -12,7 +12,10 @@ runs fine on a real Amiga, but a Makefile full of Unix-relative paths
 not "..". Build-Amiga therefore calls vc once per source file with paths
 relative to the project root (no parent references at all), then links
 from inside the object drawer with short object names, so every line stays
-well below the 512-character AmigaDOS Shell line limit.
+well below the 512-character AmigaDOS Shell line limit. A program with
+too many objects for one link line gets its object list written to a file
+(one short Echo per object) and pre-linked by vlink (-r -F<list>) into a
+single object first; vc then links just that one.
 
 The source of truth stays the Makefile.amiga-cross files (they are what the
 host cross-build uses and what CI-style verification runs against): this
@@ -137,11 +140,22 @@ def generate(proj, name):
                             + ' -I"$NDK_INC" -I"$RT_INC"')
             link = (f"vc +aos68k -o {'/' * depth}bin/amiga/{prog} "
                     f"{' '.join(names)} {' '.join(ld)}").rstrip()
-            if len(link) > MAX_LINE:
-                warn.append(f"{prog}: link line is {len(link)} chars")
-            body += [f"CD {odir}", link, f"CD {'/' * depth}"]
-            host.append(f'( cd {odir} && "$VC" +"$CFG" -o {"../" * depth}bin/amiga/{prog} '
-                        f'{" ".join(names)} -L"$RT_LIB" {" ".join(ld)} )')
+            if len(link) <= MAX_LINE:
+                body += [f"CD {odir}", link, f"CD {'/' * depth}"]
+                host.append(f'( cd {odir} && "$VC" +"$CFG" -o {"../" * depth}bin/amiga/{prog} '
+                            f'{" ".join(names)} -L"$RT_LIB" {" ".join(ld)} )')
+            else:
+                # too long for one Shell line: list file + vlink pre-link
+                lst, allo = "objects.lst", "linkall.o"
+                body += [f"CD {odir}"]
+                body += [f'Echo {">" if i == 0 else ">>"}{lst} "{n}"' for i, n in enumerate(names)]
+                body += [f"vlink -r -bamigahunk -F{lst} -o {allo}",
+                         (f"vc +aos68k -o {'/' * depth}bin/amiga/{prog} {allo} {' '.join(ld)}").rstrip(),
+                         f"CD {'/' * depth}"]
+                host.append(f'( cd {odir} && printf "%s\\n" {" ".join(names)} > {lst} && '
+                            f'vlink -r -bamigahunk -F{lst} -o {allo} && '
+                            f'"$VC" +"$CFG" -o {"../" * depth}bin/amiga/{prog} {allo} '
+                            f'-L"$RT_LIB" {" ".join(ld)} )')
 
     head = [
         f"; Build-Amiga -- natives Bauen von {name} auf AmigaOS 3.x mit vbcc",
