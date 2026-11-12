@@ -1965,7 +1965,8 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
      * name while the original gets deleted on the server */
     {
         int name_max = opts->name_max > 0 ? opts->name_max
-                     : dry_run ? 255 : localfs_name_max(local_root);
+                     : dry_run ? localfs_name_max_guess(local_root)   /* writes nothing */
+                               : localfs_name_max(local_root);
         run_name_max = name_max;
         if (!find_long_names(&ridx, name_max, &case_skips, &out->skipped)) {
             ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: kein Speicher");

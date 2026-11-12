@@ -89,6 +89,12 @@ int localfs_replace(const char *src, const char *dst);
  * on AmigaOS (classic FFS truncates silently to 30), 255 elsewhere. */
 int localfs_name_max(const char *dir);
 
+/* Like localfs_name_max(), but without writing anything (a dry run):
+ * AmigaOS reads the volume's DiskType -- DOS\0..DOS\5 (OFS/FFS without
+ * long names) 30, anything else (DOS\6/\7, SFS, PFS3) 255. RAM: reports
+ * DOS\0 too, so it errs towards 30 there. Elsewhere as localfs_name_max(). */
+int localfs_name_max_guess(const char *dir);
+
 /* 1 if the last name of path fits what its directory's file system keeps
  * (localfs_name_max() of the directory, remembered for the last
  * directory asked about), else 0 and *max_out (if given) set. Check

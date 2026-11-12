@@ -15,6 +15,12 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef PLATFORM_AMIGA
+#include <exec/memory.h>
+#include <dos/dos.h>
+#include <proto/exec.h>
+#include <proto/dos.h>
+#endif
 
 void localfs_join(char *out, size_t sz, const char *dir, const char *name)
 {
@@ -78,6 +84,32 @@ int localfs_name_max(const char *dir)
     const char *env = getenv("AMICLOUD_NAME_MAX");
     int forced = env ? atoi(env) : 0;
     return forced > 0 ? forced : probe_name_max(dir);
+}
+
+int localfs_name_max_guess(const char *dir)
+{
+#ifdef PLATFORM_AMIGA
+    const char *env = getenv("AMICLOUD_NAME_MAX");
+    int forced = env ? atoi(env) : 0;
+    struct InfoData *info;
+    BPTR lock;
+    int max = 30;
+    if (forced > 0) return forced;
+    info = (struct InfoData *)AllocMem(sizeof(struct InfoData), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!info) return 30;
+    lock = Lock((STRPTR)(dir && *dir ? dir : ""), ACCESS_READ);
+    if (lock) {
+        if (Info(lock, info)) {
+            ULONG t = (ULONG)info->id_DiskType;
+            if ((t & 0xFFFFFF00UL) != 0x444F5300UL || (t & 0xFF) > 5) max = 255;
+        }
+        UnLock(lock);
+    }
+    FreeMem(info, sizeof(struct InfoData));
+    return max;
+#else
+    return localfs_name_max(dir);
+#endif
 }
 
 int localfs_name_fits(const char *path, int *max_out)
