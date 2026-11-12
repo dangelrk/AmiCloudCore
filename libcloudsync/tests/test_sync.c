@@ -83,6 +83,7 @@ typedef struct {
 
 static char g_tmproot[512];
 static int  g_name_max;   /* SyncOptions.name_max for the next runs, 0 = probe */
+static int  g_remote_name_max;   /* SyncOptions.remote_name_max, 0 = no limit */
 static int (*g_virus)(const char *, long, char *, size_t);   /* SyncOptions.virus_check */
 static int  g_conflict_skip;   /* SyncOptions.conflict_skip (the pre-0.3 behaviour) */
 static int  g_force_deletes;   /* SyncOptions.force_deletes */
@@ -215,6 +216,7 @@ static void run_root(Env *e, const char *remote_root, int dry)
         o.dry_run = dry;
         o.verbose = 1;
         o.name_max = g_name_max;
+        o.remote_name_max = g_remote_name_max;
         o.virus_check = g_virus;
         o.conflict_skip = g_conflict_skip;
         o.force_deletes = g_force_deletes;
@@ -1951,6 +1953,50 @@ static void t_long_names(void)
     env_free(&e);
 }
 
+/* Amiga mode on the server: a NEW local name longer than 30 characters
+ * is neither uploaded nor deleted; one the server already has syncs as
+ * before (existing data never gets stuck) */
+static void t_remote_long_names(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    fake_put_data(&e.f, rp(&e, "Bestand_mit_einem_sehr_langen_Namen.txt"), "alt", T0);
+    run(&e);
+    g_remote_name_max = 30;
+    lw(&e, "Neu_mit_einem_sehr_langen_Namen_123.txt", "neu", T0);
+    lw(&e, "Ein_neuer_Ordner_mit_langem_Namen/in.txt", "drin", T0);
+    lw(&e, "kurz.txt", "kurz", T0);
+    lw(&e, "Bestand_mit_einem_sehr_langen_Namen.txt", "geaendert", T0 + 100);
+    run(&e);
+    CHECK_EQ(e.s.uploaded, 2);                     /* kurz.txt + Bestand */
+    CHECK_EQ(e.s.skipped, 2);
+    CHECK_EQ(e.s.conflicts, 0);
+    CHECK(fake_has(&e.f, rp(&e, "kurz.txt"), "kurz"));
+    CHECK(fake_has(&e.f, rp(&e, "Bestand_mit_einem_sehr_langen_Namen.txt"), "geaendert"));
+    CHECK(!fake_find(&e.f, rp(&e, "Neu_mit_einem_sehr_langen_Namen_123.txt")));
+    run(&e);
+    CHECK(lhas(&e, "Neu_mit_einem_sehr_langen_Namen_123.txt", "neu"));
+    CHECK(lhas(&e, "Ein_neuer_Ordner_mit_langem_Namen/in.txt", "drin"));
+    CHECK_EQ(e.f.calls[FOP_DEL], 0);
+    g_remote_name_max = 0;
+    run(&e);                                       /* long names allowed again */
+    CHECK(fake_has(&e.f, rp(&e, "Neu_mit_einem_sehr_langen_Namen_123.txt"), "neu"));
+    env_free(&e);
+}
+
+/* the same limit reported by the server's status (transport name_max) */
+static void t_remote_long_names_status(void)
+{
+    Env e; env_init(&e, FAKE_AMICLOUD);
+    e.f.t.name_max = 30;
+    lw(&e, "Neu_mit_einem_sehr_langen_Namen_123.txt", "neu", T0);
+    lw(&e, "kurz.txt", "kurz", T0);
+    run(&e);
+    CHECK_EQ(e.s.uploaded, 1);
+    CHECK_EQ(e.s.skipped, 1);
+    CHECK(!fake_find(&e.f, rp(&e, "Neu_mit_einem_sehr_langen_Namen_123.txt")));
+    env_free(&e);
+}
+
 /* a larger tree: first sync, then an idle run (was O(n^2) before S12) */
 static void t_many_files(void)
 {
@@ -2658,6 +2704,8 @@ static const Test tests[] = {
     { "S12: 2000 Dateien",                           t_many_files, NULL },
     { "S11: Zwischenstand bei langem Lauf",          t_checkpoint, NULL },
     { "S15: zu lange Namen uebersprungen",           t_long_names, NULL },
+    { "Amiga-Modus: neue lange Namen nicht hoch",    t_remote_long_names, NULL },
+    { "Amiga-Modus: Grenze aus dem Server-Status",   t_remote_long_names_status, NULL },
     { "Pruefung: Umbenennen bei gleicher Revision",  t_rename_same_revision, NULL },
     { "Pruefung: .DS_Store im geloeschten Ordner",   t_dsstore_dir_delete, NULL },
     { "Pruefung: Ausgeschlossenes im Ordner (AmiCloud)", t_excl_ac, NULL },

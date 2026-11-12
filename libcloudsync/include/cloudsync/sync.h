@@ -60,6 +60,13 @@ typedef struct {
     /* Longest local file name in bytes; 0 = ask libcloudfs
      * (localfs_name_max(), S15). Longer remote names are skipped. */
     int name_max;
+    /* Longest NEW name (characters) the server lets this account create
+     * (AcStatus.name_max: 30 in Amiga mode); 0 = what the transport's
+     * global_rev() reported (SyncTransport.name_max). A local file or
+     * folder with a longer name that the server and the baseline do not
+     * know yet is skipped and reported -- not uploaded, and not deleted
+     * either. Names already on the server sync as before. */
+    int remote_name_max;
     /* Virus check of every file before it is uploaded or put in place
      * after a download (libcloudfs: xvs.library on AmigaOS, nothing
      * elsewhere). virus_max: largest file checked, 0 = LOCALFS_VIRUS_MAX,

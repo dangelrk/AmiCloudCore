@@ -533,6 +533,51 @@ static int find_long_names(const SyncIndex *idx, int name_max, CaseSkips *cs, in
     return 1;
 }
 
+/* characters of a UTF-8 name (the server counts them, not bytes) */
+static int utf8_chars(const char *s)
+{
+    int c = 0;
+    for (; *s; s++) if (((unsigned char)*s & 0xC0) != 0x80) c++;
+    return c;
+}
+
+/* 1 if sorted idx has path */
+static int index_has(const SyncIndex *idx, const char *path)
+{
+    int lo = 0, hi = idx->n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        int cmp = strcmp(idx->items[mid].path, path);
+        if (cmp == 0) return 1;
+        if (cmp < 0) lo = mid + 1; else hi = mid;
+    }
+    return 0;
+}
+
+/* Amiga mode on the server (SyncOptions.remote_name_max): adds every
+ * local path whose own name is longer than max and that neither the
+ * server (ridx) nor the baseline knows -- it would be refused on upload
+ * -- to cs; *count is the number added. 0 on out of memory. */
+static int find_long_local_names(const SyncIndex *lidx, const SyncIndex *ridx,
+                                 SyncState *old_st, int max, CaseSkips *cs, int *count)
+{
+    int i;
+    *count = 0;
+    for (i = 0; i < lidx->n; i++) {
+        const char *p = lidx->items[i].path, *name = strrchr(p, '/');
+        char f[AC_MAX_PATH];
+        name = name ? name + 1 : p;
+        if (utf8_chars(name) <= max || case_skipped(cs, p)) continue;
+        if (index_has(ridx, p) || syncstate_find(old_st, p)) continue;
+        ui_notify(UI_WARN, "'%s': Name laenger als %d Zeichen, der Server nimmt keine neuen "
+                  "langen Namen an (Amiga-Modus) -- nicht hochgeladen", p, max);
+        fold_case(f, sizeof(f), p);
+        if (!skips_add(cs, f)) return 0;
+        (*count)++;
+    }
+    return 1;
+}
+
 /* Adds the folded paths that occur more than once in idx to cs (which
  * find_long_names() has set up). 0 on out of memory. */
 static int find_case_collisions(const SyncIndex *idx, CaseSkips *cs)
@@ -1928,6 +1973,18 @@ void cloudsync_run_ex(SyncTransport *t, const char *local_root, const char *remo
             out->aborted = 1;
             goto out_free;
         }
+    }
+    if (opts->remote_name_max > 0 || t->name_max > 0) {
+        int added = 0;
+        int rmax = opts->remote_name_max > 0 ? opts->remote_name_max : t->name_max;
+        if (!find_long_local_names(&lidx, &ridx, &old_st, rmax,
+                                   &case_skips, &added)) {
+            ui_notify(UI_ERROR, "Abgleich abgebrochen, nichts geaendert: kein Speicher");
+            out->errors++;
+            out->aborted = 1;
+            goto out_free;
+        }
+        out->skipped += added;
     }
 
     /* S6 (a dry run must not write the probe file: assume insensitive) */

@@ -95,7 +95,11 @@ static int amicloud_setdate(SyncTransport *t, const char *remote_path, long mtim
 
 static int amicloud_global_rev(SyncTransport *t, long *global_out)
 {
-    return cmd_status(t->cfg, NULL, 0, global_out);
+    AcStatus st;
+    int ok = cmd_status_ex(t->cfg, &st);
+    *global_out = ok ? st.global_revision : 0;
+    t->name_max = ok ? st.name_max : 0;   /* one status call serves both */
+    return ok;
 }
 
 /* Rows per page: a 68k Amiga holds a page in memory twice (JSON and

@@ -182,6 +182,12 @@ typedef struct SyncTransport {
     /* Optional; NULL if the backend holds no per-run resources to
      * release (true for both backends today). */
     void (*close)(struct SyncTransport *t);
+
+    /* Set by global_rev() from the server's status: the longest NEW name
+     * (characters) the account may create (AmiCloud Amiga mode: 30); 0 =
+     * no limit or not known (WebDAV, older servers). The kernel uses it
+     * when SyncOptions.remote_name_max is 0. */
+    int name_max;
 } SyncTransport;
 
 #endif /* CLOUDSYNC_TRANSPORT_H */

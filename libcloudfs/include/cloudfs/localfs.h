@@ -89,6 +89,13 @@ int localfs_replace(const char *src, const char *dst);
  * on AmigaOS (classic FFS truncates silently to 30), 255 elsewhere. */
 int localfs_name_max(const char *dir);
 
+/* 1 if the last name of path fits what its directory's file system keeps
+ * (localfs_name_max() of the directory, remembered for the last
+ * directory asked about), else 0 and *max_out (if given) set. Check
+ * before creating anything: classic FFS would truncate silently and the
+ * file could land on top of a different one. */
+int localfs_name_fits(const char *path, int *max_out);
+
 /* Virus check of a local file (optional). AmigaOS: xvs.library 33+ (if
  * installed) checks the whole file in memory for link, file and data
  * viruses (VirusZ's engine). Elsewhere, without the library, or for a

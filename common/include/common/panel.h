@@ -103,6 +103,14 @@ void panel_copy_file(PanelSource ssrc, const AcConfig *scfg, const char *spath,
 int panel_local_clashes(const char *const *unames, int n, const char *local_dir,
                         unsigned char *skip);
 
+/* Before a single-file get (cmd_get()/cmd_get_checked()): 1 if the
+ * local target -- local_path, or the remote file's name in the current
+ * directory, as cmd_get() derives it -- fits the local file system's name
+ * length (classic FFS keeps 30 and truncates silently, so the download
+ * could land on a different file). Else warns and returns 0; nothing is
+ * touched. */
+int panel_get_target_fits(const AcConfig *cfg, const char *remote_path, const char *local_path);
+
 /* Recursive get/put orchestration — shared by the shell's `get -r`/
  * `put -r` and the GUI Commander's F5 copy. When c->ask, also prompts
  * (via ui_overwrite(), is_dir=1) if remote_path/local_path already

@@ -401,6 +401,7 @@ int cmd_status_ex(const AcConfig *cfg, AcStatus *out)
         str = json_object_get_string(root, "version");
         if (str) strncpy(out->version, str, sizeof(out->version) - 1);
         out->global_revision = jlong(root, "global_revision");
+        out->name_max = (int)jlong(root, "name_max");   /* absent: 0 */
 
         user = json_object_get_object(root, "user");
         if (user) {

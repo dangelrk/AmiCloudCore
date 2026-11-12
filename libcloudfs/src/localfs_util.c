@@ -14,6 +14,7 @@
 #include "localfs.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 void localfs_join(char *out, size_t sz, const char *dir, const char *name)
 {
@@ -67,8 +68,50 @@ void localfs_sibling(char *out, size_t sz, const char *path, const char *name)
  * long names with the same first 30 characters end up in one file -- and
  * the DiskType does not tell (RAM: says DOS\0 but takes long names). So:
  * create a file with a 120-character name and read back how long its name
- * really became. Elsewhere 255. A failed probe gives the safe 30. */
+ * really became. Elsewhere 255. A failed probe gives the safe 30.
+ * AMICLOUD_NAME_MAX=<n> in the environment overrides it (tests: a
+ * classic FFS limit on the PC). */
+static int probe_name_max(const char *dir);
+
 int localfs_name_max(const char *dir)
+{
+    const char *env = getenv("AMICLOUD_NAME_MAX");
+    int forced = env ? atoi(env) : 0;
+    return forced > 0 ? forced : probe_name_max(dir);
+}
+
+int localfs_name_fits(const char *path, int *max_out)
+{
+    static char last_dir[AC_MAX_PATH];
+    static int  last_max = 0;
+    char dir[AC_MAX_PATH];
+    const char *cut = NULL, *p;
+    size_t dlen;
+    int max;
+
+    for (p = path; *p; p++) {
+        if (*p == '/' || *p == ':'
+#ifdef PLATFORM_WIN
+            || *p == '\\'
+#endif
+           ) cut = p;
+    }
+    dlen = cut ? (size_t)(cut - path) + (*cut == ':' || cut == path ? 1 : 0) : 0;   /* "DH0:", "/" */
+    if (dlen >= sizeof(dir)) dlen = sizeof(dir) - 1;
+    memcpy(dir, path, dlen);
+    dir[dlen] = '\0';
+    if (last_max > 0 && strcmp(dir, last_dir) == 0) {
+        max = last_max;
+    } else {
+        max = localfs_name_max(dir);
+        strcpy(last_dir, dir);
+        last_max = max;
+    }
+    if (max_out) *max_out = max;
+    return (int)strlen(cut ? cut + 1 : path) <= max;
+}
+
+static int probe_name_max(const char *dir)
 {
 #ifdef PLATFORM_AMIGA
     static const char prefix[] = ".amicloudsync.namelen";

@@ -242,12 +242,45 @@ static const char *basename_of(const char *path)
     return slash ? slash + 1 : path;
 }
 
+int panel_get_target_fits(const AcConfig *cfg, const char *remote_path, const char *local_path)
+{
+    char target[AC_MAX_PATH];
+    int name_max;
+    if (local_path && *local_path) {
+        strncpy(target, local_path, sizeof(target) - 1);
+        target[sizeof(target) - 1] = '\0';
+    } else {
+        char rfull[AC_MAX_PATH];
+        const char *slash;
+        cmd_resolve_path(cfg, remote_path, rfull, sizeof(rfull));
+        slash = strrchr(rfull, '/');
+        cs_from_utf8(slash ? slash + 1 : rfull, target, sizeof(target));
+    }
+    if (localfs_name_fits(target, &name_max)) return 1;
+    ui_notify(UI_ERROR, "%s: name longer than this file system keeps (%d characters) -- skipped",
+              target, name_max);
+    return 0;
+}
+
 void panel_copy_file(PanelSource ssrc, const AcConfig *scfg, const char *spath,
                      PanelSource dsrc, const AcConfig *dcfg, const char *dpath,
                      const char *name, const FileMeta *smeta,
                      const FileMeta *dmeta, CopyCtx *c)
 {
     if (c->cancelled) return;
+
+    /* a name the local file system would truncate (classic FFS: 30):
+     * it could land on a different file -- before any prompt */
+    if (dsrc == PANEL_LOCAL) {
+        int name_max;
+        if (!localfs_name_fits(dpath, &name_max)) {
+            ui_notify(UI_ERROR, "%s: name longer than this file system keeps (%d characters) "
+                      "-- skipped", name, name_max);
+            c->pr.err++;
+            if (!ui_progress(0, smeta ? smeta->size : 0, name)) c->cancelled = 1;
+            return;
+        }
+    }
 
     if (c->ask && dmeta) {
         UiOverwrite ow;
@@ -418,6 +451,18 @@ void panel_get_dir(const AcConfig *cfg, const char *remote_path,
      * unprocessed the entire time (Amiga: nothing pumps
      * MUIM_Application_NewInput outside a ui_progress() call). */
     if (!ui_progress(0, -1, disp_name(basename_of(remote_path)))) { c->cancelled = 1; return; }
+
+    /* the directory's own name must fit (classic FFS: 30), or two long
+     * folder names would become one */
+    {
+        int name_max;
+        if (!localfs_name_fits(local_path, &name_max)) {
+            ui_notify(UI_ERROR, "%s: name longer than this file system keeps (%d characters) "
+                      "-- folder skipped", local_path, name_max);
+            c->pr.err++;
+            return;
+        }
+    }
 
     /* Cheap local existence check (no network) before the remote list —
      * mirrors panel_put_dir()'s cmd_list_raw() existence+snapshot combo. */

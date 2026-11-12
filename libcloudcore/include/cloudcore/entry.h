@@ -97,6 +97,9 @@ typedef struct {
     long quota_total_kb;
     char user[64];         /* account name as stored on the server */
     char display_name[128];
+    int  name_max;         /* longest NEW name the account may create
+                            * (30 = Amiga mode, the default); 0 = server
+                            * sent none (older deployment): no limit */
 } AcStatus;
 
 #endif /* CLOUDCORE_ENTRY_H */
