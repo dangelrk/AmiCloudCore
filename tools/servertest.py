@@ -72,6 +72,18 @@ def check_content(archive, top):
             if f"{top}/INSTALL.md" in names else ""
     if "@VERSION@" in guide:
         errors.append("INSTALL.md: @VERSION@ nicht ersetzt")
+    migs = sorted(f for f in names if os.path.basename(f).startswith("migrate_")
+                  and f.endswith(".sql"))
+    if migs:
+        if f"{top}/UPDATE.md" not in names:
+            errors.append("UPDATE.md fehlt, obwohl es Datenbank-Migrationen gibt")
+        else:
+            with tarfile.open(archive) as tar:
+                upd = tar.extractfile(f"{top}/UPDATE.md").read().decode("utf-8")
+            if "@VERSION@" in upd:
+                errors.append("UPDATE.md: @VERSION@ nicht ersetzt")
+            if os.path.basename(migs[-1]) not in upd:
+                errors.append(f"UPDATE.md nennt die neueste Migration {os.path.basename(migs[-1])} nicht")
     repo = subprocess.run(["git", "ls-files", "-z", "server"], capture_output=True,
                           check=True).stdout.decode().split("\0")
     want = {f"{top}/{f}" for f in repo if f and os.path.basename(f) != "config.php"}

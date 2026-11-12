@@ -7,6 +7,12 @@
       <Projekt>-Server-<version>/
         INSTALL.md   install/server/README.md (@VERSION@ ersetzt) + der
                      Server-Abschnitt aus docs/INSTALL.md
+        UPDATE.md    install/server/UPDATE.md (@VERSION@ ersetzt): eine
+                     bestehende Installation aktualisieren, mit den noetigen
+                     Datenbank-Migrationen. Pflicht, sobald es
+                     server/sql/migrate_*.sql gibt, und sie muss die neueste
+                     davon nennen -- sonst bricht der Paketbau ab, damit
+                     keine Datenbank-Aenderung ohne Anleitung hinausgeht.
         LICENSE
         server/      alle versionierten Dateien aus server/ (ohne config.php)
         ...          weitere Dateien nach SERVER_EXTRA (quelle[:ziel])
@@ -80,6 +86,19 @@ def main():
     guide = open(readme, encoding="utf-8").read().replace("@VERSION@", version)
     guide = guide.rstrip("\n") + "\n\n" + section("docs/INSTALL.md", heading)
 
+    update_src = "install/server/UPDATE.md"
+    migs = sorted(os.path.basename(f) for f in files
+                  if f.startswith("server/sql/migrate_") and f.endswith(".sql"))
+    update = None
+    if os.path.isfile(update_src):
+        update = open(update_src, encoding="utf-8").read().replace("@VERSION@", version)
+    if migs and update is None:
+        die(f"{update_src} fehlt -- es gibt Datenbank-Migrationen ({migs[-1]}), "
+            "also muss das Paket beschreiben, wie man aktualisiert")
+    if migs and migs[-1] not in update:
+        die(f"{update_src} nennt die neueste Migration {migs[-1]} nicht -- "
+            "beschreiben, wer sie wann einspielen muss")
+
     os.makedirs(outdir, exist_ok=True)
     out = os.path.join(outdir, f"{top}.tar.gz")
 
@@ -105,12 +124,17 @@ def main():
         ti.size, ti.mtime = len(data), int(os.path.getmtime(readme))
         add_dirs(ti.name, ti.mtime)
         tar.addfile(norm(ti), io.BytesIO(data))
+        if update is not None:
+            data = update.encode("utf-8")
+            ti = tarfile.TarInfo(f"{top}/UPDATE.md")
+            ti.size, ti.mtime = len(data), int(os.path.getmtime(update_src))
+            tar.addfile(norm(ti), io.BytesIO(data))
         for name, src in members:
             ti = tar.gettarinfo(src, arcname=name)
             add_dirs(name, int(ti.mtime))
             with open(src, "rb") as fh:
                 tar.addfile(norm(ti), fh)
-    print(f"{out}: {len(members) + 1} Dateien, {os.path.getsize(out)} Bytes")
+    print(f"{out}: {len(members) + 1 + (update is not None)} Dateien, {os.path.getsize(out)} Bytes")
 
 
 if __name__ == "__main__":
